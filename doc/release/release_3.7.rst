@@ -266,6 +266,7 @@ Maintenance
 - Fix typo while dispatching vf2pp (`#8904 <https://github.com/networkx/networkx/pull/8904>`_).
 - Support for Py3.15 (`#8896 <https://github.com/networkx/networkx/pull/8896>`_).
 - Update minimum dependencies (SPEC 0) (`#8916 <https://github.com/networkx/networkx/pull/8916>`_).
+- Add ``resource_constrained_path``: an exact label-setting algorithm for the resource-constrained shortest path problem, with an optional Pareto front and a bounded label count.
 
 Other
 -----

@@ -202,6 +202,16 @@ Advanced Interface
    johnson
 
 
+Resource-Constrained Shortest Path
+----------------------------------
+
+.. automodule:: networkx.algorithms.shortest_paths.resource_constrained
+.. autosummary::
+   :toctree: generated/
+
+   resource_constrained_path
+
+
 Dense Graphs
 ------------
 
