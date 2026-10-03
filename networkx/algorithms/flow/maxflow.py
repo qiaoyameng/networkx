@@ -14,7 +14,13 @@ from .utils import build_flow_dict
 # Define the default flow function for computing maximum flow.
 default_flow_func = preflow_push
 
-__all__ = ["maximum_flow", "maximum_flow_value", "minimum_cut", "minimum_cut_value"]
+__all__ = [
+    "maximum_flow",
+    "maximum_flow_value",
+    "minimum_cut",
+    "minimum_cut_value",
+    "all_minimum_cuts",
+]
 
 
 @nx._dispatchable(
@@ -434,6 +440,7 @@ def minimum_cut(flowG, _s, _t, capacity="capacity", flow_func=None, **kwargs):
     --------
     :meth:`maximum_flow`
     :meth:`maximum_flow_value`
+    :meth:`all_minimum_cuts`
     :meth:`minimum_cut_value`
     :meth:`edmonds_karp`
     :meth:`preflow_push`
@@ -542,6 +549,221 @@ def minimum_cut(flowG, _s, _t, capacity="capacity", flow_func=None, **kwargs):
         queue = next_layer
     partition = (set(flowG) - non_reachable, non_reachable)
     return (R.graph["flow_value"], partition)
+
+
+@nx._dispatchable(
+    graphs="flowG", edge_attrs={"capacity": float("inf")}, preserve_edge_attrs=True
+)
+def all_minimum_cuts(
+    flowG, _s, _t, capacity="capacity", flow_func=None, cutoff=None, **kwargs
+):
+    """Lazily enumerate all minimum (s, t)-cuts of a capacitated graph.
+
+    A single maximum flow is computed and its residual network is reused
+    to enumerate every minimum (s, t)-cut, following the approach of
+    Picard and Queyranne [1]_: the strongly connected components of the
+    residual network are contracted, and each successor-closed set of the
+    resulting condensation DAG that contains the source component but not
+    the sink component corresponds to exactly one minimum cut.
+
+    Parameters
+    ----------
+    flowG : NetworkX graph
+        Edges of the graph are expected to have an attribute called
+        'capacity'. If this attribute is not present, the edge is
+        considered to have infinite capacity.
+
+    _s : node
+        Source node for the flow.
+
+    _t : node
+        Sink node for the flow.
+
+    capacity : string or function (default= 'capacity')
+        If this is a string, then edge capacity will be accessed via the
+        edge attribute with this key (that is, the capacity of the edge
+        joining `u` to `v` will be ``G.edges[u, v][capacity]``). If no
+        such edge attribute exists, the capacity of the edge is assumed to
+        be infinite.
+
+        If this is a function, the capacity of an edge is the value
+        returned by the function. The function must accept exactly three
+        positional arguments: the two endpoints of an edge and the
+        dictionary of edge attributes for that edge. The function must
+        return a number or None to indicate a hidden edge.
+
+    flow_func : function
+        A function for computing the maximum flow among a pair of nodes
+        in a capacitated graph. The function has to accept at least three
+        parameters: a Graph or Digraph, a source node, and a target node.
+        And return a residual network that follows NetworkX conventions
+        (see the Notes of :meth:`minimum_cut`). If flow_func is None, the
+        default maximum flow function (:meth:`preflow_push`) is used.
+        Default value: None.
+
+    cutoff : integer, optional (default=None)
+        Maximum number of minimum cuts to yield. If None (default), the
+        enumeration is exhaustive. If the enumeration stops because
+        `cutoff` cuts have been yielded, this only means the enumeration
+        was truncated; it does not imply that all minimum cuts have been
+        found.
+
+    kwargs : Any other keyword parameter is passed to the function that
+        computes the maximum flow.
+
+    Yields
+    ------
+    cut : tuple
+        A tuple ``(cut_value, partition, cutset)`` where ``cut_value`` is
+        the value of the minimum cut (equal to the maximum flow value,
+        identical for every yielded cut), ``partition`` is a pair of node
+        sets ``(S, T)`` with ``_s`` in ``S``, ``_t`` in ``T`` and
+        ``S | T`` equal to the set of all nodes, and ``cutset`` is the
+        set of edges ``(u, v)`` of `flowG` with ``u`` in ``S`` and ``v``
+        in ``T``. Each partition is yielded at most once.
+
+    Raises
+    ------
+    NetworkXError
+        The algorithm does not support MultiGraph and MultiDiGraph. If
+        the input graph is an instance of one of these two classes, a
+        NetworkXError is raised. It is also raised if `flow_func` is not
+        callable, if keyword parameters are passed via ``kwargs`` without
+        explicitly setting `flow_func`, or if `cutoff` is negative.
+
+    NetworkXUnbounded
+        If the graph has a path of infinite capacity, all cuts have
+        infinite capacity and the function raises a NetworkXUnbounded.
+
+    See also
+    --------
+    :meth:`minimum_cut`
+    :meth:`minimum_cut_value`
+    :meth:`maximum_flow`
+
+    Notes
+    -----
+    The maximum flow is computed once when this function is called; the
+    enumeration itself is lazy and never recomputes a flow. After
+    contracting the strongly connected components of the residual
+    network, the minimum (s, t)-cuts are in one-to-one correspondence
+    with the successor-closed sets of the condensation DAG that contain
+    the component of ``_s`` and are disjoint from the component of
+    ``_t`` [1]_. Components that cannot reach the sink component and are
+    not reachable from the source component are free: each of them may
+    lie on either side of a minimum cut, so the number of minimum cuts
+    can be exponential in the number of nodes.
+
+    A residual edge is considered usable exactly when
+    ``flow < capacity``; no numerical tolerance is applied. With integer
+    (or otherwise exactly representable) capacities the enumeration is
+    exact. With floating point capacities, roundoff in the flow
+    computation may make a saturated edge look usable or vice versa; a
+    tolerance-based policy for that case is not provided here.
+
+    References
+    ----------
+    .. [1] Picard, J.-C., and Queyranne, M. (1980).
+           "On the structure of all minimum cuts in a network and
+           applications." Mathematical Programming Study 13, 8-16.
+
+    Examples
+    --------
+    >>> G = nx.DiGraph()
+    >>> G.add_edge("s", "a", capacity=1)
+    >>> G.add_edge("s", "b", capacity=1)
+    >>> G.add_edge("a", "t", capacity=1)
+    >>> G.add_edge("b", "t", capacity=1)
+    >>> cuts = list(nx.all_minimum_cuts(G, "s", "t"))
+    >>> len(cuts)  # each of the two disjoint edges may be cut
+    4
+    >>> all(value == 2 for value, _, _ in cuts)
+    True
+    >>> sorted(sorted(s) for _, (s, _), _ in cuts)
+    [['a', 'b', 's'], ['a', 's'], ['b', 's'], ['s']]
+
+    Use `cutoff` to bound the number of enumerated cuts without
+    materializing all of them:
+
+    >>> it = nx.all_minimum_cuts(G, "s", "t", cutoff=2)
+    >>> len(list(it))
+    2
+
+    """
+    if flow_func is None:
+        if kwargs:
+            raise nx.NetworkXError(
+                "You have to explicitly set a flow_func if"
+                " you need to pass parameters via kwargs."
+            )
+        flow_func = default_flow_func
+
+    if not callable(flow_func):
+        raise nx.NetworkXError("flow_func has to be callable.")
+
+    if cutoff is not None and cutoff < 0:
+        raise nx.NetworkXError("cutoff must be a non-negative integer or None.")
+
+    # A full maximum flow (not value_only) is needed: with value_only=True
+    # some algorithms stop at a preflow whose residual network does not
+    # induce all minimum cuts.
+    R = flow_func(flowG, _s, _t, capacity=capacity, value_only=False, **kwargs)
+    flow_value = R.graph["flow_value"]
+
+    # Residual network restricted to edges with spare capacity.
+    residual = nx.DiGraph()
+    residual.add_nodes_from(R)
+    residual.add_edges_from(
+        (u, v)
+        for u, nbrs in R.adjacency()
+        for v, attr in nbrs.items()
+        if attr["flow"] < attr["capacity"]
+    )
+
+    # Contract the strongly connected components of the residual network.
+    condensation = nx.condensation(residual)
+    mapping = condensation.graph["mapping"]
+    members = {c: condensation.nodes[c]["members"] for c in condensation}
+
+    # descendants[c]: components reachable from c in the condensation DAG,
+    # including c itself. A minimum cut (S, T) corresponds to a
+    # successor-closed set of components with the source component in S
+    # and the sink component in T.
+    descendants = {c: {c} for c in condensation}
+    for c in reversed(list(nx.topological_sort(condensation))):
+        for d in condensation[c]:
+            descendants[c] |= descendants[d]
+
+    source_scc = mapping[_s]
+    sink_scc = mapping[_t]
+    forced = descendants[source_scc]
+    banned = {c for c in condensation if sink_scc in descendants[c]}
+
+    def closures(source_side, excluded):
+        # Yield every successor-closed superset of `source_side` disjoint
+        # from `excluded`, each exactly once.
+        yield source_side
+        excluded = set(excluded)
+        candidates = sorted(set(descendants) - source_side - excluded)
+        for c in candidates:
+            with_c = source_side | descendants[c]
+            if not with_c & excluded:
+                yield from closures(with_c, excluded)
+            excluded.add(c)
+
+    def generate():
+        nodes = set(flowG)
+        count = 0
+        for source_sccs in closures(forced, banned):
+            if cutoff is not None and count >= cutoff:
+                return
+            source = set().union(*(members[c] for c in source_sccs))
+            target = nodes - source
+            cutset = {(u, v) for u, v in flowG.edges(source) if v in target}
+            count += 1
+            yield (flow_value, (source, target), cutset)
+
+    return generate()
 
 
 @nx._dispatchable(

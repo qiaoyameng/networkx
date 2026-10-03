@@ -15,6 +15,7 @@ Maximum Flow
    maximum_flow_value
    minimum_cut
    minimum_cut_value
+   all_minimum_cuts
 
 .. _networkx.algorithms.flow.edmondskarp:
 
