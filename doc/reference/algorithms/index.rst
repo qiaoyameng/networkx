@@ -73,6 +73,7 @@ Algorithms
    swap
    threshold
    time_dependent
+   timetable
    tournament
    traversal
    tree
