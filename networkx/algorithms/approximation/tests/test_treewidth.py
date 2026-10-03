@@ -1,7 +1,11 @@
 import itertools
+import random
+
+import pytest
 
 import networkx as nx
 from networkx.algorithms.approximation import (
+    maximum_weight_independent_set,
     treewidth_min_degree,
     treewidth_min_fill_in,
 )
@@ -272,3 +276,132 @@ class TestTreewidthMinFillIn:
 
         # check only the first 2 elements for equality
         assert steps[:2] == [6, 5]
+
+
+def _brute_force_mwis(G, weight="weight"):
+    """Maximum weight independent set by enumeration of all subsets."""
+    best_weight, best_set = 0, set()
+    for r in range(len(G) + 1):
+        for combo in itertools.combinations(G, r):
+            nodes = set(combo)
+            if any(G.has_edge(u, v) for u, v in itertools.combinations(nodes, 2)):
+                continue
+            if any(G.has_edge(v, v) for v in nodes):
+                continue
+            w = sum(G.nodes[v].get(weight, 1) for v in nodes)
+            if w > best_weight:
+                best_weight, best_set = w, nodes
+    return best_weight, best_set
+
+
+class TestMaximumWeightIndependentSet:
+    """Unit tests for maximum_weight_independent_set on tree decompositions."""
+
+    def _check_solution(self, G, weight, result):
+        w, nodes = result
+        assert isinstance(nodes, set)
+        assert nodes <= set(G)
+        for u, v in itertools.combinations(nodes, 2):
+            assert not G.has_edge(u, v)
+        if weight:
+            expected = sum(G.nodes[v].get(weight, 1) for v in nodes)
+        else:
+            expected = len(nodes)
+        assert w == expected
+
+    def test_path_graph_matches_brute_force(self):
+        G = nx.path_graph(8)
+        for v, w in zip(G, [3, -1, 0, 5, -2, 4, 1, -7]):
+            G.nodes[v]["weight"] = w
+        for decomp in (
+            treewidth_min_degree(G)[1],
+            treewidth_min_fill_in(G)[1],
+        ):
+            result = maximum_weight_independent_set(G, decomp)
+            self._check_solution(G, "weight", result)
+            assert result[0] == _brute_force_mwis(G)[0]
+
+    def test_join_decomposition_string_nodes(self):
+        # Two triangles sharing node "c"; the root bag joins both branches.
+        G = nx.Graph()
+        G.add_edges_from(
+            [("a", "b"), ("b", "c"), ("c", "a"), ("c", "d"), ("d", "e"), ("e", "c")]
+        )
+        for v, w in zip("abcde", [2, -3, 4, 1, 5]):
+            G.nodes[v]["weight"] = w
+        decomp = nx.Graph()
+        root = frozenset(["c"])
+        decomp.add_edge(root, frozenset(["a", "b", "c"]))
+        decomp.add_edge(root, frozenset(["c", "d", "e"]))
+        result = maximum_weight_independent_set(G, decomp)
+        self._check_solution(G, "weight", result)
+        assert result[0] == _brute_force_mwis(G)[0]
+
+    def test_random_graphs_match_brute_force(self):
+        rng = random.Random(42)
+        for trial in range(20):
+            n = rng.randint(1, 9)
+            G = nx.gnm_random_graph(n, rng.randint(0, n * (n - 1) // 2), seed=trial)
+            for v in G:
+                G.nodes[v]["weight"] = rng.randint(-3, 5)
+            _, decomp = treewidth_min_degree(G)
+            result = maximum_weight_independent_set(G, decomp)
+            self._check_solution(G, "weight", result)
+            assert result[0] == _brute_force_mwis(G)[0]
+
+    def test_all_negative_weights_empty_set(self):
+        G = nx.path_graph(4)
+        for v in G:
+            G.nodes[v]["weight"] = -2
+        _, decomp = treewidth_min_degree(G)
+        assert maximum_weight_independent_set(G, decomp) == (0, set())
+
+    def test_unweighted(self):
+        G = nx.path_graph(5)
+        _, decomp = treewidth_min_degree(G)
+        w, nodes = maximum_weight_independent_set(G, decomp, weight=None)
+        assert w == 3
+        assert len(nodes) == 3
+
+    def test_empty_graph(self):
+        assert maximum_weight_independent_set(nx.Graph(), nx.Graph()) == (0, set())
+
+    def test_edge_not_covered_raises(self):
+        G = nx.path_graph(3)
+        decomp = nx.Graph()
+        decomp.add_edge(frozenset([0, 1]), frozenset([0, 2]))
+        with pytest.raises(nx.NetworkXError, match="not covered by any bag"):
+            maximum_weight_independent_set(G, decomp)
+
+    def test_node_not_in_any_bag_raises(self):
+        G = nx.path_graph(3)
+        decomp = nx.Graph()
+        decomp.add_node(frozenset([0, 1, 2]))
+        G.add_node("isolated")
+        with pytest.raises(nx.NetworkXError, match="does not appear in any bag"):
+            maximum_weight_independent_set(G, decomp)
+
+    def test_disconnected_subtree_raises(self):
+        G = nx.path_graph(3)
+        decomp = nx.Graph()
+        decomp.add_edge(frozenset([0, 1]), frozenset([0, 2]))
+        decomp.add_edge(frozenset([0, 2]), frozenset([1, 2]))
+        with pytest.raises(nx.NetworkXError, match="connected subtree"):
+            maximum_weight_independent_set(G, decomp)
+
+    def test_not_a_tree_raises(self):
+        G = nx.path_graph(3)
+        decomp = nx.Graph()
+        decomp.add_edge(frozenset([0, 1]), frozenset([1, 2]))
+        decomp.add_edge(frozenset([1, 2]), frozenset([0, 1, 2]))
+        decomp.add_edge(frozenset([0, 1, 2]), frozenset([0, 1]))
+        with pytest.raises(nx.NetworkXError, match="must be a tree"):
+            maximum_weight_independent_set(G, decomp)
+
+    def test_max_bag_size_exceeded_raises(self):
+        G = nx.path_graph(3)
+        _, decomp = treewidth_min_degree(G)
+        with pytest.raises(nx.NetworkXError, match="max_bag_size"):
+            maximum_weight_independent_set(G, decomp, max_bag_size=1)
+        # A sufficient limit does not raise.
+        maximum_weight_independent_set(G, decomp, max_bag_size=2)

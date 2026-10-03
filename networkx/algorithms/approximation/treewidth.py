@@ -36,7 +36,11 @@ from heapq import heapify, heappop, heappush
 import networkx as nx
 from networkx.utils import not_implemented_for
 
-__all__ = ["treewidth_min_degree", "treewidth_min_fill_in"]
+__all__ = [
+    "treewidth_min_degree",
+    "treewidth_min_fill_in",
+    "maximum_weight_independent_set",
+]
 
 
 @not_implemented_for("directed")
@@ -253,3 +257,228 @@ def treewidth_decomp(G, heuristic=min_fill_in_heuristic):
         decomp.add_edge(old_bag, new_bag)
 
     return treewidth, decomp
+
+
+def _validate_tree_decomposition(G, decomp):
+    """Raise `NetworkXError` if `decomp` is not a valid tree decomposition of `G`.
+
+    A valid tree decomposition is a tree whose nodes ("bags") are sets of
+    nodes of `G` such that every node of `G` appears in some bag, every edge
+    of `G` has both endpoints in some common bag, and the bags containing any
+    given node of `G` form a connected subtree.
+    """
+    if not nx.is_tree(decomp):
+        raise nx.NetworkXError("decomp must be a tree.")
+
+    bags = list(decomp.nodes)
+    for bag in bags:
+        for v in bag:
+            if v not in G:
+                raise nx.NetworkXError(
+                    f"decomp bag contains {v!r}, which is not a node of G."
+                )
+
+    # Every node of G must appear in some bag, and the bags containing it
+    # must form a connected subtree of the decomposition.
+    for v in G:
+        containing = [bag for bag in bags if v in bag]
+        if not containing:
+            raise nx.NetworkXError(f"node {v!r} of G does not appear in any bag.")
+        if len(containing) > 1 and not nx.is_connected(decomp.subgraph(containing)):
+            raise nx.NetworkXError(
+                f"the bags containing node {v!r} do not form a connected subtree."
+            )
+
+    # Every edge of G must have both endpoints together in some bag.
+    for u, v in G.edges():
+        if not any(u in bag and v in bag for bag in bags):
+            raise nx.NetworkXError(
+                f"edge ({u!r}, {v!r}) of G is not covered by any bag."
+            )
+
+
+@not_implemented_for("directed")
+@not_implemented_for("multigraph")
+@nx._dispatchable
+def maximum_weight_independent_set(G, decomp, weight="weight", max_bag_size=None):
+    r"""Returns a maximum weight independent set of `G` using a tree decomposition.
+
+    An independent set is a set of nodes no two of which are adjacent. This
+    function computes an independent set of maximum total node weight by
+    dynamic programming over the given tree decomposition `decomp` of `G`.
+    The running time is exponential in the size of the largest bag but only
+    linear in the number of bags, so it is efficient when `G` has small
+    treewidth and a decomposition of small width is provided.
+
+    Parameters
+    ----------
+    G : NetworkX graph
+        The undirected graph on which to compute the independent set.
+
+    decomp : NetworkX graph
+        A tree decomposition of `G` as returned, e.g., by
+        :func:`treewidth_min_degree` or :func:`treewidth_min_fill_in`: a tree
+        whose nodes are containers ("bags") of nodes of `G`. Every node of
+        `G` must appear in some bag, every edge of `G` must have both
+        endpoints in some common bag, and the bags containing any given node
+        must form a connected subtree.
+
+    weight : string or None, optional (default="weight")
+        The node attribute used as weight. Nodes without the attribute have
+        weight 1. If None, every node has weight 1. Weights may be zero or
+        negative; the empty set is always a feasible solution (of weight 0).
+
+    max_bag_size : int or None, optional (default=None)
+        Maximum allowed bag size. If the largest bag of `decomp` exceeds
+        this value, a `NetworkXError` is raised before running the
+        (exponential in the bag size) dynamic program.
+
+    Returns
+    -------
+    (weight, nodes) : tuple
+        The total weight of a maximum weight independent set and the set of
+        nodes of `G` forming it.
+
+    Raises
+    ------
+    NetworkXNotImplemented
+        If `G` is directed or a multigraph.
+
+    NetworkXError
+        If `decomp` is not a valid tree decomposition of `G`, or if the
+        largest bag exceeds `max_bag_size`.
+
+    Examples
+    --------
+    >>> G = nx.path_graph(4)
+    >>> tw, decomp = nx.algorithms.approximation.treewidth_min_degree(G)
+    >>> w, nodes = nx.algorithms.approximation.maximum_weight_independent_set(G, decomp)
+    >>> w
+    2
+    >>> all(not G.has_edge(u, v) for u in nodes for v in nodes)
+    True
+
+    Notes
+    -----
+    The decomposition tree is rooted at an arbitrary bag and processed
+    bottom-up. For each bag, a table maps every independent subset of the
+    bag (its "state") to the maximum weight of an independent set of the
+    processed subtree that agrees with the state on the bag. Merging a child
+    bag into its parent handles the three classical cases: nodes present in
+    the child but not the parent are *forgotten* (their weight is folded
+    into the best compatible child state), nodes present in the parent but
+    not the child are *introduced*, and a bag with several children *joins*
+    their tables, subtracting the weight of shared nodes so that each node
+    weight is counted exactly once.
+
+    See Also
+    --------
+    treewidth_min_degree
+    treewidth_min_fill_in
+    maximal_independent_set
+    """
+    if len(G) == 0:
+        return 0, set()
+
+    if max_bag_size is not None:
+        largest = max((len(bag) for bag in decomp.nodes), default=0)
+        if largest > max_bag_size:
+            raise nx.NetworkXError(
+                f"largest bag of decomp has size {largest},"
+                f" which exceeds max_bag_size={max_bag_size}."
+            )
+
+    _validate_tree_decomposition(G, decomp)
+
+    if weight is None:
+        weights = {v: 1 for v in G}
+    else:
+        weights = {v: data.get(weight, 1) for v, data in G.nodes(data=True)}
+
+    # Root the decomposition tree at an arbitrary bag and compute a
+    # bottom-up processing order (children before parents).
+    root = next(iter(decomp.nodes))
+    parent = {root: None}
+    children = {root: []}
+    order = [root]
+    for bag in order:
+        for nbr in decomp.neighbors(bag):
+            if nbr not in parent:
+                parent[nbr] = bag
+                children[nbr] = []
+                children[bag].append(nbr)
+                order.append(nbr)
+
+    bag_members = {}  # bag -> list of its nodes (fixes a position per node)
+    tables = {}  # bag -> {state bitmask: max weight in the processed subtree}
+    choices = {}  # bag -> {(child, parent state): chosen child state}
+
+    for bag in reversed(order):
+        members = list(bag)
+        bag_members[bag] = members
+        position = {v: i for i, v in enumerate(members)}
+        # Adjacency (including self-loops) restricted to the bag, as bitmasks.
+        adjacency = [0] * len(members)
+        for i, u in enumerate(members):
+            for v in G[u]:
+                j = position.get(v)
+                if j is not None:
+                    adjacency[i] |= 1 << j
+
+        # States are the independent subsets of the bag; the weight of the
+        # selected bag nodes is counted here, at the highest bag (closest to
+        # the root) containing them, so it is counted exactly once.
+        table = {}
+        for mask in range(1 << len(members)):
+            if all(
+                not adjacency[i] & mask for i in range(len(members)) if mask >> i & 1
+            ):
+                table[mask] = sum(
+                    weights[members[i]] for i in range(len(members)) if mask >> i & 1
+                )
+
+        bag_choices = {}
+        for child in children[bag]:
+            child_members = bag_members[child]
+            # Best child state for each possible intersection with this bag.
+            # The weight of shared nodes is subtracted so it is not counted
+            # twice; forgotten child nodes are folded into `best`.
+            best = {}
+            for cmask, value in tables[child].items():
+                cap = 0
+                cap_weight = 0
+                for j, v in enumerate(child_members):
+                    if cmask >> j & 1 and v in position:
+                        cap |= 1 << position[v]
+                        cap_weight += weights[v]
+                candidate = value - cap_weight
+                if cap not in best or candidate > best[cap][0]:
+                    best[cap] = (candidate, cmask)
+            child_set = set(child_members)
+            merged = {}
+            for mask, value in table.items():
+                key = 0
+                for i, v in enumerate(members):
+                    if mask >> i & 1 and v in child_set:
+                        key |= 1 << i
+                gain, cmask = best[key]
+                merged[mask] = value + gain
+                bag_choices[child, mask] = cmask
+            table = merged
+        tables[bag] = table
+        choices[bag] = bag_choices
+
+    best_mask = max(tables[root], key=tables[root].get)
+    best_weight = tables[root][best_mask]
+
+    # Backtrack from the root to recover the selected nodes.
+    selected = set()
+    stack = [(root, best_mask)]
+    while stack:
+        bag, mask = stack.pop()
+        members = bag_members[bag]
+        selected.update(members[i] for i in range(len(members)) if mask >> i & 1)
+        for child in children[bag]:
+            stack.append((child, choices[bag][child, mask]))
+
+    return best_weight, selected

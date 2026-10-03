@@ -122,6 +122,7 @@ Treewidth
 
    treewidth_min_degree
    treewidth_min_fill_in
+   maximum_weight_independent_set
 
 
 Vertex Cover
