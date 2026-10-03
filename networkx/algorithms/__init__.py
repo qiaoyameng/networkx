@@ -110,11 +110,14 @@ from networkx.algorithms.flow import cost_of_flow
 from networkx.algorithms.flow import gomory_hu_tree
 from networkx.algorithms.flow import max_flow_min_cost
 from networkx.algorithms.flow import maximum_flow
+from networkx.algorithms.flow import all_minimum_cuts
 from networkx.algorithms.flow import maximum_flow_value
 from networkx.algorithms.flow import min_cost_flow
 from networkx.algorithms.flow import min_cost_flow_cost
 from networkx.algorithms.flow import minimum_cut
 from networkx.algorithms.flow import minimum_cut_value
+from networkx.algorithms.flow import MinimumCut
+from networkx.algorithms.flow import AllMinimumCuts
 from networkx.algorithms.flow import network_simplex
 from networkx.algorithms.isomorphism import could_be_isomorphic
 from networkx.algorithms.isomorphism import fast_could_be_isomorphic

@@ -1,3 +1,4 @@
+from .allmincuts import *
 from .maxflow import *
 from .mincost import *
 from .boykovkolmogorov import *
