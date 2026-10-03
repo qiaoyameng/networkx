@@ -52,6 +52,7 @@ Enhancements
 - Avoid O(E) lookup in nx.display -issue8639 (`#8663 <https://github.com/networkx/networkx/pull/8663>`_).
 - Add HITS algorithm benchmark to benchmark suite (`#8625 <https://github.com/networkx/networkx/pull/8625>`_).
 - Add DAG antichain width (`#8654 <https://github.com/networkx/networkx/pull/8654>`_).
+- Add ``all_pairs_lowest_common_ancestors`` and ``DAGLCAIndex`` to return the complete set of lowest common ancestors in a DAG, reusing a precomputed ancestor index with explicit rebuild/version invalidation for graph mutations.
 - escape tuple labels in generate_gml (`#8755 <https://github.com/networkx/networkx/pull/8755>`_).
 - Speed up the residual flow reset in ``edmonds_karp`` and simplify the ``minimum_cut`` partition (`#8756 <https://github.com/networkx/networkx/pull/8756>`_).
 - Avoid building the flow dict in maximum_flow_value (`#8754 <https://github.com/networkx/networkx/pull/8754>`_).

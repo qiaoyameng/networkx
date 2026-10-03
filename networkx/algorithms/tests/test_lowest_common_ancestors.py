@@ -457,3 +457,198 @@ def test_lca_dont_rely_on_single_successor():
     G.add_nodes_from(range(4))
     G.add_edges_from([(2, 0), (2, 1), (3, 1), (3, 0), (3, 2)])
     assert nx.lowest_common_ancestor(G, 0, 1) == 2
+
+
+class _Unorderable:
+    """Hashable node that intentionally cannot be compared or sorted."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __hash__(self):
+        return hash(self.name)
+
+    def __eq__(self, other):
+        return isinstance(other, _Unorderable) and self.name == other.name
+
+    def __lt__(self, other):
+        raise TypeError("nodes are not orderable")
+
+    __le__ = __gt__ = __ge__ = __lt__
+
+    def __repr__(self):
+        return f"_Unorderable({self.name!r})"
+
+
+class TestAllPairsLCASets:
+    """Complete sets of lowest common ancestors on general DAGs."""
+
+    @staticmethod
+    def diamond_diamond():
+        # r is a higher common ancestor; a and b are two incomparable,
+        # mutually unreachable lowest common ancestors of x and y.
+        G = nx.DiGraph(
+            [("r", "a"), ("r", "b"), ("a", "x"), ("b", "x"),
+             ("a", "y"), ("b", "y")]
+        )
+        return G
+
+    def test_acceptance_two_incomparable_lcas_plus_higher_ancestor(self):
+        G = self.diamond_diamond()
+        result = dict(nx.all_pairs_lowest_common_ancestors(G, [("x", "y")]))
+        assert result == {("x", "y"): {"a", "b"}}
+        index = nx.DAGLCAIndex(G)
+        assert index.lowest_common_ancestors("x", "y") == {"a", "b"}
+        # The higher common ancestor must not survive.
+        assert "r" not in index.lowest_common_ancestors("x", "y")
+
+    def test_self_pair_contains_node_itself(self):
+        G = self.diamond_diamond()
+        index = nx.DAGLCAIndex(G)
+        for node in G:
+            assert index.lowest_common_ancestors(node, node) == {node}
+        result = dict(nx.all_pairs_lowest_common_ancestors(G, [("x", "x")]))
+        assert result == {("x", "x"): {"x"}}
+
+    def test_no_common_ancestor_returns_empty_set(self):
+        G = nx.DiGraph([(1, 2), (3, 4)])
+        index = nx.DAGLCAIndex(G)
+        assert index.lowest_common_ancestors(2, 4) == set()
+        assert dict(index([(2, 4), (2, 2)])) == {
+            (2, 4): set(),
+            (2, 2): {2},
+        }
+        result = dict(nx.all_pairs_lowest_common_ancestors(G, [(2, 4)]))
+        assert result == {(2, 4): set()}
+        # An isolated node paired with an unrelated node has no LCA,
+        # but its self-pair still contains itself.
+        G.add_node(9)
+        index.rebuild()
+        assert index.lowest_common_ancestors(9, 2) == set()
+        assert index.lowest_common_ancestors(9, 9) == {9}
+
+    def test_default_pairs_and_duplicates(self):
+        G = nx.DiGraph([(0, 1), (1, 2)])
+        result = dict(nx.all_pairs_lowest_common_ancestors(G))
+        assert len(result) == 6
+        assert result[(0, 2)] == {0}
+        index = nx.DAGLCAIndex(G)
+        subset = dict(index([(0, 2), (0, 2)]))
+        assert subset == {(0, 2): {0}}
+
+    def test_set_agrees_with_single_lca_on_unique_dag(self):
+        # On the existing test DAG the set-valued answer must be a singleton
+        # containing whatever lowest_common_ancestor returns.
+        G = nx.DiGraph()
+        nx.add_path(G, (0, 1, 2, 3))
+        nx.add_path(G, (0, 4, 3))
+        nx.add_path(G, (0, 5, 6, 8, 3))
+        nx.add_path(G, (5, 7, 8))
+        G.add_edge(6, 2)
+        G.add_edge(7, 2)
+        index = nx.DAGLCAIndex(G)
+        for u, v in product(G, repeat=2):
+            lcas = index.lowest_common_ancestors(u, v)
+            single = nx.lowest_common_ancestor(G, u, v)
+            if single is None:
+                assert lcas == set()
+            else:
+                # The single-LCA routine returns one arbitrary member of
+                # the full set of lowest common ancestors.
+                assert single in lcas
+                # None of the other lowest ancestors is reachable from it.
+                for other in lcas - {single}:
+                    assert other not in nx.descendants(G, single)
+
+    def test_multiple_valid_solutions_returns_both(self):
+        G = nx.DiGraph(
+            [(2, 0), (3, 0), (2, 1), (3, 1)]
+        )
+        index = nx.DAGLCAIndex(G)
+        assert index.lowest_common_ancestors(0, 1) == {2, 3}
+
+    def test_nodes_need_not_be_orderable(self):
+        r, a, b, x, y = (_Unorderable(c) for c in "rabxy")
+        G = nx.DiGraph(
+            [(r, a), (r, b), (a, x), (b, x), (a, y), (b, y)]
+        )
+        index = nx.DAGLCAIndex(G)
+        assert index.lowest_common_ancestors(x, y) == {a, b}
+        result = dict(nx.all_pairs_lowest_common_ancestors(G, [(x, y)]))
+        assert result == {(x, y): {a, b}}
+
+    def test_multigraph(self):
+        G = nx.MultiDiGraph(
+            [("r", "a"), ("r", "b"), ("a", "x"), ("b", "x"),
+             ("a", "y"), ("b", "y")]
+        )
+        G.add_edge("r", "a")
+        index = nx.DAGLCAIndex(G)
+        assert index.lowest_common_ancestors("x", "y") == {"a", "b"}
+
+    def test_invalid_nodes(self):
+        G = self.diamond_diamond()
+        index = nx.DAGLCAIndex(G)
+        with pytest.raises(nx.NodeNotFound):
+            index.lowest_common_ancestors("x", "nope")
+        with pytest.raises(nx.NodeNotFound):
+            list(index([("x", "nope")]))
+        with pytest.raises(nx.NodeNotFound):
+            list(nx.all_pairs_lowest_common_ancestors(G, [("x", "nope")]))
+
+    def test_null_cyclic_and_undirected(self):
+        with pytest.raises(nx.NetworkXPointlessConcept):
+            nx.DAGLCAIndex(nx.DiGraph())
+        with pytest.raises(nx.NetworkXError):
+            nx.DAGLCAIndex(nx.DiGraph([(1, 2), (2, 1)]))
+        with pytest.raises(nx.NetworkXNotImplemented):
+            nx.DAGLCAIndex(nx.Graph([(1, 2)]))
+        with pytest.raises(nx.NetworkXNotImplemented):
+            next(nx.all_pairs_lowest_common_ancestors(nx.Graph([(1, 2)])))
+        # Rebuilding on a graph that became cyclic is an error too.
+        G = nx.DiGraph([(1, 2)])
+        index = nx.DAGLCAIndex(G)
+        G.add_edge(2, 1)
+        with pytest.raises(nx.NetworkXError):
+            index.rebuild()
+
+    def test_index_is_reused_across_queries(self):
+        G = self.diamond_diamond()
+        index = nx.DAGLCAIndex(G)
+        before = index.ancestor_sets
+        assert index.lowest_common_ancestors("x", "y") == {"a", "b"}
+        assert index.lowest_common_ancestors("a", "b") == {"r"}
+        # Same precomputed structure is reused, not rebuilt.
+        assert index.ancestor_sets is before
+
+    def test_staleness_after_mutation_and_explicit_rebuild(self):
+        G = self.diamond_diamond()
+        index = nx.DAGLCAIndex(G)
+
+        G.add_edge("z", "x")
+        G.add_edge("z", "y")
+        with pytest.raises(nx.NetworkXError, match="stale LCA index"):
+            index.lowest_common_ancestors("x", "y")
+        with pytest.raises(nx.NetworkXError, match="stale LCA index"):
+            list(index([("x", "y")]))
+
+        index.rebuild()
+        assert index.lowest_common_ancestors("x", "y") == {"a", "b", "z"}
+
+        # Same node/edge counts but a different edge set must still be
+        # detected: version invalidation cannot rely on counts alone.
+        G.remove_edge("z", "y")
+        G.add_edge("z", "a")
+        with pytest.raises(nx.NetworkXError):
+            index.lowest_common_ancestors("x", "y")
+        index.rebuild()
+        # z now reaches only y, so it is no longer a common ancestor.
+        assert index.lowest_common_ancestors("x", "y") == {"a", "b"}
+
+    def test_attribute_change_does_not_invalidate(self):
+        # LCA depends only on the node/edge sets, not on attributes.
+        G = self.diamond_diamond()
+        index = nx.DAGLCAIndex(G)
+        G.nodes["x"]["color"] = "red"
+        G["r"]["a"]["weight"] = 3
+        assert index.lowest_common_ancestors("x", "y") == {"a", "b"}

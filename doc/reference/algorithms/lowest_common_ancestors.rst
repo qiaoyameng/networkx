@@ -7,5 +7,7 @@ Lowest Common Ancestor
    :toctree: generated/
 
    all_pairs_lowest_common_ancestor
+   all_pairs_lowest_common_ancestors
    tree_all_pairs_lowest_common_ancestor
    lowest_common_ancestor
+   DAGLCAIndex
