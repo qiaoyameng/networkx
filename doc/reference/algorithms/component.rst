@@ -28,6 +28,13 @@ Strong connectivity
    kosaraju_strongly_connected_components
    condensation
 
+Incremental strongly connected components
+------------------------------------------
+.. autosummary::
+   :toctree: generated/
+
+   IncrementalSCC
+
 .. _networkx.algorithms.components.weakly_connected:
 
 Weak connectivity

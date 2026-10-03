@@ -4,3 +4,5 @@ from .weakly_connected import *
 from .attracting import *
 from .biconnected import *
 from .semiconnected import *
+
+from .incremental_scc import *
