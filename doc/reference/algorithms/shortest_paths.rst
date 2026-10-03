@@ -201,6 +201,16 @@ Advanced Interface
    goldberg_radzik
    johnson
 
+Replacement Paths
+-----------------
+
+.. automodule:: networkx.algorithms.shortest_paths.replacement_paths
+.. autosummary::
+   :toctree: generated/
+
+   replacement_paths
+   replacement_path_lengths
+
 
 Dense Graphs
 ------------
