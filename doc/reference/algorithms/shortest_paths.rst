@@ -216,6 +216,16 @@ Dense Graphs
    reconstruct_path
 
 
+Automaton-Constrained Paths
+---------------------------
+
+.. automodule:: networkx.algorithms.shortest_paths.constrained
+.. autosummary::
+   :toctree: generated/
+
+   constrained_shortest_path
+
+
 A* Algorithm
 ------------
 
