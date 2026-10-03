@@ -28,6 +28,15 @@ Strong connectivity
    kosaraju_strongly_connected_components
    condensation
 
+Incremental SCC maintenance
+---------------------------
+.. autosummary::
+   :toctree: generated/
+
+   IncrementalSCC
+   StaleComponentError
+   UnknownComponentError
+
 .. _networkx.algorithms.components.weakly_connected:
 
 Weak connectivity
