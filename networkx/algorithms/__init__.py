@@ -23,6 +23,7 @@ from networkx.algorithms.dominance import *
 from networkx.algorithms.dominating import *
 from networkx.algorithms.efficiency_measures import *
 from networkx.algorithms.euler import *
+from networkx.algorithms.frustration import *
 from networkx.algorithms.graphical import *
 from networkx.algorithms.hierarchy import *
 from networkx.algorithms.hybrid import *

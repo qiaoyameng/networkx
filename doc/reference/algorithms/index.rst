@@ -39,6 +39,7 @@ Algorithms
    efficiency_measures
    euler
    flow
+   frustration
    graph_hashing
    graphical
    hierarchy
