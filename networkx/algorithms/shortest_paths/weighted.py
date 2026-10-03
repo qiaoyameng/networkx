@@ -3,11 +3,15 @@ Shortest path algorithms for weighted graphs.
 """
 
 from collections import deque
+from dataclasses import dataclass
 from heapq import heappop, heappush
 from itertools import count, islice
+import math
+import numbers
 
 import networkx as nx
 from networkx.algorithms.shortest_paths.generic import _build_paths_from_predecessors
+from networkx.utils.decorators import not_implemented_for
 
 __all__ = [
     "dijkstra_path",
@@ -23,6 +27,9 @@ __all__ = [
     "all_pairs_dijkstra_path",
     "all_pairs_dijkstra_path_length",
     "dijkstra_predecessor_and_distance",
+    "resource_constrained_shortest_path",
+    "ResourceConstrainedPath",
+    "ResourceConstrainedShortestPathResult",
     "bellman_ford_path",
     "bellman_ford_path_length",
     "single_source_bellman_ford",
@@ -36,6 +43,38 @@ __all__ = [
     "goldberg_radzik",
     "johnson",
 ]
+
+
+class _ParetoLabel:
+    __slots__ = ("node", "cost", "resource", "parent", "edge_key")
+
+    def __init__(self, node, cost, resource, parent=None, edge_key=None):
+        self.node = node
+        self.cost = cost
+        self.resource = resource
+        self.parent = parent
+        self.edge_key = edge_key
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceConstrainedPath:
+    """A feasible path for :func:`resource_constrained_shortest_path`."""
+
+    node_path: list
+    cost: object
+    resource: object
+    edge_keys: list
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceConstrainedShortestPathResult:
+    """Result of an exact resource-constrained shortest-path search."""
+
+    path: ResourceConstrainedPath | None
+    pareto_frontier: tuple[ResourceConstrainedPath, ...]
+    complete: bool
+    label_count: int
+    max_labels: int
 
 
 def _weight_function(G, weight):
@@ -76,6 +115,295 @@ def _weight_function(G, weight):
     if G.is_multigraph():
         return lambda u, v, d: min(attr.get(weight, 1) for attr in d.values())
     return lambda u, v, data: data.get(weight, 1)
+
+
+def _nonnegative_number(value, name):
+    if not isinstance(value, numbers.Real):
+        raise nx.NetworkXError(f"{name} must be a finite nonnegative number")
+    try:
+        is_finite = math.isfinite(value)
+    except (TypeError, OverflowError):
+        try:
+            is_finite = value.is_finite()
+        except AttributeError:
+            is_finite = False
+    try:
+        is_nonnegative = value >= 0
+    except TypeError:
+        is_nonnegative = False
+    if not is_finite or not is_nonnegative:
+        raise nx.NetworkXError(f"{name} must be a finite nonnegative number")
+    return value
+
+
+def _edge_values(G, edges):
+    if G.is_multigraph():
+        for key, data in edges.items():
+            yield key, data
+    else:
+        yield None, edges
+
+
+def _label_path(label):
+    labels = []
+    while label is not None:
+        labels.append(label)
+        label = label.parent
+    labels.reverse()
+    node_path = [label.node for label in labels]
+    edge_keys = [label.edge_key for label in labels[1:]]
+    return ResourceConstrainedPath(
+        node_path,
+        labels[-1].cost,
+        labels[-1].resource,
+        edge_keys,
+    )
+
+
+def _add_pareto_label(labels, candidate, label_count, max_labels):
+    kept = []
+    for label in labels:
+        if label.cost <= candidate.cost and label.resource <= candidate.resource:
+            return label_count, "dominated"
+        if not (
+            candidate.cost <= label.cost
+            and candidate.resource <= label.resource
+        ):
+            kept.append(label)
+
+    if label_count >= max_labels:
+        return label_count, "limit"
+    labels[:] = kept + [candidate]
+    return label_count + 1, "added"
+
+
+@not_implemented_for("undirected")
+@nx._dispatchable(preserve_edge_attrs=True)
+def resource_constrained_shortest_path(
+    G,
+    source,
+    target,
+    resource_budget,
+    cost="cost",
+    resource="resource",
+    *,
+    pareto_frontier=False,
+    max_labels=10_000,
+):
+    """Find an exact minimum-cost path satisfying a resource budget.
+
+    This is a label-setting algorithm for directed graphs. Every edge has
+    a nonnegative cost and a nonnegative resource consumption. It returns a
+    minimum-cost path whose total resource is at most ``resource_budget``.
+
+    Parameters
+    ----------
+    G : NetworkX graph
+        A directed graph or directed multigraph. Undirected graphs are not
+        accepted because the direction of every traversed edge would be
+        ambiguous.
+
+    source : node
+        Starting node.
+
+    target : node
+        Ending node.
+
+    resource_budget : real number
+        Inclusive upper bound on the sum of edge resource values. It must be
+        finite and nonnegative.
+
+    cost : string or callable, default='cost'
+        Edge attribute containing the cost. If callable, it must accept
+        ``(u, v, edge_data)`` and return a finite nonnegative number;
+        returning ``None`` hides that edge.
+
+    resource : string or callable, default='resource'
+        Edge attribute containing the resource consumption. If callable, it
+        must accept the same arguments as `cost` and return a finite
+        nonnegative number; returning ``None`` hides that edge.
+
+    pareto_frontier : bool, default=False
+        If true, enumerate all nondominated feasible target labels. A target
+        label dominates another when both its cost and resource are no larger
+        and at least one is smaller.
+
+    max_labels : int, default=10000
+        Maximum number of nondominated labels accepted during the search.
+        The resource-constrained shortest-path problem is NP-hard, so this
+        number can grow exponentially. If the limit is reached, the result's
+        ``complete`` attribute is false and the reported values are not claimed
+        to be globally optimal.
+
+    Returns
+    -------
+    ResourceConstrainedShortestPathResult
+        ``path`` is the best feasible target path found, ``pareto_frontier``
+        contains :class:`ResourceConstrainedPath` objects when requested, and
+        ``complete`` is true only when the bounded exact search finished.
+        ``label_count`` is the cumulative number of Pareto labels accepted
+        before the search stopped or reached `max_labels`.
+
+    Raises
+    ------
+    NodeNotFound
+        If `source` or `target` is not in the graph.
+
+    NetworkXNoPath
+        If the exact search finishes without finding a feasible path.
+
+    NetworkXNotImplemented
+        If `G` is undirected.
+
+    NetworkXError
+        If the budget is invalid, an edge lacks a required attribute, or an
+        edge cost/resource is not finite and nonnegative.
+
+    Notes
+    -----
+    Predecessors are stored on individual Pareto labels rather than only on
+    nodes. This is necessary because the best predecessor for one cost and
+    resource pair need not be the best predecessor for another pair.
+
+    Equal labels at the same node are retained only once, including labels
+    produced by zero-cost zero-resource cycles or identical parallel edges.
+    Parallel edges are distinguished in ``path.edge_keys`` for multigraphs.
+
+    Examples
+    --------
+    >>> G = nx.DiGraph()
+    >>> G.add_edge(0, 1, cost=1, resource=5)
+    >>> G.add_edge(0, 2, cost=4, resource=1)
+    >>> G.add_edge(1, 3, cost=1, resource=0)
+    >>> G.add_edge(2, 3, cost=1, resource=0)
+    >>> result = nx.resource_constrained_shortest_path(G, 0, 3, 1)
+    >>> result.path.node_path
+    [0, 2, 3]
+    >>> result.path.cost
+    5
+    >>> result.path.resource
+    1
+    """
+    if source not in G:
+        raise nx.NodeNotFound(f"source {source} is not in G")
+    if target not in G:
+        raise nx.NodeNotFound(f"target {target} is not in G")
+    _nonnegative_number(resource_budget, "resource_budget")
+    if isinstance(max_labels, bool) or not isinstance(max_labels, int):
+        raise nx.NetworkXError("max_labels must be a positive integer")
+    if max_labels <= 0:
+        raise nx.NetworkXError("max_labels must be a positive integer")
+
+    def value(attr, name, u, v, data):
+        if callable(attr):
+            value_ = attr(u, v, data)
+        else:
+            try:
+                value_ = data[attr]
+            except KeyError as err:
+                raise nx.NetworkXError(
+                    f"edge ({u}, {v}) is missing required attribute {attr!r}"
+                ) from err
+        if value_ is None:
+            return None
+        return _nonnegative_number(value_, name)
+
+    labels_by_node = {}
+    start = _ParetoLabel(source, 0, 0)
+    labels_by_node[source] = [start]
+    label_count = 1
+    complete = True
+    fringe = [(0, 0, 0, start)]
+    target_labels = []
+
+    while True:
+        while fringe:
+            current_cost, current_resource, _, current = heappop(fringe)
+            current_labels = labels_by_node.get(current.node, ())
+            if not any(
+                label is current
+                or (
+                    label.cost == current_cost
+                    and label.resource == current_resource
+                )
+                for label in current_labels
+            ):
+                continue
+
+            if current.node == target:
+                target_path = _label_path(current)
+                if pareto_frontier:
+                    target_labels.append(current)
+                    continue
+                return ResourceConstrainedShortestPathResult(
+                    target_path,
+                    (target_path,),
+                    True,
+                    label_count,
+                    max_labels,
+                )
+
+            for neighbor, edge_data in G[current.node].items():
+                for edge_key, data in _edge_values(G, edge_data):
+                    edge_cost = value(cost, "cost", current.node, neighbor, data)
+                    if edge_cost is None:
+                        continue
+                    edge_resource = value(
+                        resource, "resource", current.node, neighbor, data
+                    )
+                    if edge_resource is None:
+                        continue
+                    next_cost = current_cost + edge_cost
+                    next_resource = current_resource + edge_resource
+                    if next_resource > resource_budget:
+                        continue
+
+                    candidate = _ParetoLabel(
+                        neighbor,
+                        next_cost,
+                        next_resource,
+                        current,
+                        edge_key,
+                    )
+                    neighbor_labels = labels_by_node.setdefault(neighbor, [])
+                    label_count, status = _add_pareto_label(
+                        neighbor_labels,
+                        candidate,
+                        label_count,
+                        max_labels,
+                    )
+                    if status == "added":
+                        heappush(
+                            fringe,
+                            (next_cost, next_resource, label_count - 1, candidate),
+                        )
+                    elif status == "limit":
+                        complete = False
+                        break
+                if not complete:
+                    break
+
+        frontier = tuple(_label_path(label) for label in target_labels)
+        best = (
+            min(frontier, key=lambda item: (item.cost, item.resource))
+            if frontier
+            else None
+        )
+        if complete:
+            if pareto_frontier:
+                return ResourceConstrainedShortestPathResult(
+                    best, frontier, True, label_count, max_labels
+                )
+            raise nx.NetworkXNoPath(
+                f"No feasible path from {source} to {target} within resource budget"
+            )
+        return ResourceConstrainedShortestPathResult(
+            best,
+            frontier if pareto_frontier else (),
+            False,
+            label_count,
+            max_labels,
+        )
 
 
 @nx._dispatchable(edge_attrs="weight")

@@ -174,6 +174,7 @@ Advanced Interface
    :toctree: generated/
 
    dijkstra_predecessor_and_distance
+   resource_constrained_shortest_path
    dijkstra_path
    dijkstra_path_length
    single_source_dijkstra

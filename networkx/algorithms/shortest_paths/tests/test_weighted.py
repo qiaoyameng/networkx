@@ -1,3 +1,5 @@
+import random
+
 import pytest
 
 import networkx as nx
@@ -981,3 +983,231 @@ class TestJohnsonAlgorithm(WeightedTestBase):
         validate_path(self.XG3, 0, 3, 15, nx.johnson(self.XG3)[0][3])
         validate_path(self.XG4, 0, 2, 4, nx.johnson(self.XG4)[0][2])
         validate_path(self.MXG4, 0, 2, 4, nx.johnson(self.MXG4)[0][2])
+
+
+class TestResourceConstrainedShortestPath:
+    def validate_rcp(self, G, result, budget):
+        path = result.path.node_path
+        assert result.complete
+        cost = resource = 0
+        for u, v, key in zip(path, path[1:], result.path.edge_keys):
+            data = G[u][v] if key is None else G[u][v][key]
+            cost += data["cost"]
+            resource += data["resource"]
+        assert (cost, resource) == (result.path.cost, result.path.resource)
+        assert resource <= budget
+
+    def test_exhaustive_layered_graph_reference(self):
+        random.seed(20261004)
+        layer_sizes = (1, 3, 4, 3, 2, 1)
+        G = nx.DiGraph()
+        nodes_by_layer = []
+        node = 0
+        for layer, size in enumerate(layer_sizes):
+            layer_nodes = []
+            for _ in range(size):
+                layer_nodes.append(node)
+                G.add_node(node, layer=layer)
+                node += 1
+            nodes_by_layer.append(layer_nodes)
+
+        for left, right in zip(nodes_by_layer, nodes_by_layer[1:]):
+            for u in left:
+                for v in right:
+                    G.add_edge(
+                        u,
+                        v,
+                        cost=random.randrange(0, 8),
+                        resource=random.randrange(0, 5),
+                    )
+
+        source = nodes_by_layer[0][0]
+        target = nodes_by_layer[-1][0]
+        all_paths = list(nx.all_simple_paths(G, source, target))
+        for budget in range(16):
+            feasible = []
+            for path in all_paths:
+                cost = sum(G[u][v]["cost"] for u, v in pairwise(path))
+                resource = sum(G[u][v]["resource"] for u, v in pairwise(path))
+                if resource <= budget:
+                    feasible.append((cost, resource, path))
+
+            if not feasible:
+                with pytest.raises(nx.NetworkXNoPath):
+                    nx.resource_constrained_shortest_path(G, source, target, budget)
+                continue
+
+            result = nx.resource_constrained_shortest_path(G, source, target, budget)
+            expected_cost = min(item[0] for item in feasible)
+            assert result.path.cost == expected_cost
+            assert result.path.node_path in [
+                path for cost, _, path in feasible if cost == expected_cost
+            ]
+            self.validate_rcp(G, result, budget)
+
+            frontier = nx.resource_constrained_shortest_path(
+                G, source, target, budget, pareto_frontier=True
+            ).pareto_frontier
+            expected_frontier = [
+                item
+                for item in feasible
+                if not any(
+                    other_cost <= item[0]
+                    and other_resource <= item[1]
+                    and (other_cost < item[0] or other_resource < item[1])
+                    for other_cost, other_resource, _ in feasible
+                )
+            ]
+            assert {(p.cost, p.resource) for p in frontier} == {
+                (cost, resource) for cost, resource, _ in expected_frontier
+            }
+
+    def test_single_label_dijkstra_counterexample(self):
+        G = nx.DiGraph()
+        G.add_edge(0, 1, cost=1, resource=6)
+        G.add_edge(1, 3, cost=1, resource=0)
+        G.add_edge(0, 2, cost=5, resource=1)
+        G.add_edge(2, 3, cost=0, resource=1)
+
+        cost_only = nx.single_source_dijkstra(G, 0, 3, weight="cost")
+        assert cost_only[0] == 2
+        assert cost_only[1] == [0, 1, 3]
+
+        result = nx.resource_constrained_shortest_path(G, 0, 3, 2)
+        assert result.path.node_path == [0, 2, 3]
+        assert (result.path.cost, result.path.resource) == (5, 2)
+
+    def test_zero_zero_cycle_terminates_and_deduplicates(self):
+        G = nx.DiGraph()
+        G.add_edge(0, 1, cost=0, resource=0)
+        G.add_edge(1, 0, cost=0, resource=0)
+        G.add_edge(1, 2, cost=3, resource=1)
+
+        result = nx.resource_constrained_shortest_path(G, 0, 2, 2)
+        assert result.path.node_path == [0, 1, 2]
+        assert result.complete
+
+    def test_multigraph_parallel_edges_and_keys(self):
+        G = nx.MultiDiGraph()
+        G.add_edge(0, 1, key="cheap", cost=1, resource=8)
+        G.add_edge(0, 1, key="expensive", cost=7, resource=1)
+        G.add_edge(1, 2, key="finish", cost=1, resource=1)
+
+        result = nx.resource_constrained_shortest_path(G, 0, 2, 2)
+        assert result.path.node_path == [0, 1, 2]
+        assert result.path.edge_keys == ["expensive", "finish"]
+        assert (result.path.cost, result.path.resource) == (8, 2)
+
+    def test_equal_target_labels_from_distinct_predecessors(self):
+        G = nx.DiGraph()
+        G.add_edge("s", "a", cost=1, resource=5)
+        G.add_edge("a", "t", cost=5, resource=1)
+        G.add_edge("s", "b", cost=5, resource=1)
+        G.add_edge("b", "t", cost=1, resource=5)
+
+        result = nx.resource_constrained_shortest_path(
+            G, "s", "t", 6, pareto_frontier=True
+        )
+        assert result.complete
+        assert result.path.node_path in [["s", "a", "t"], ["s", "b", "t"]]
+        assert result.path.node_path[1] == result.pareto_frontier[0].node_path[1]
+
+    def test_unorderable_nodes(self):
+        class Node:
+            pass
+
+        source, middle, target = Node(), Node(), Node()
+        G = nx.DiGraph()
+        G.add_edge(source, middle, cost=5, resource=1)
+        G.add_edge(middle, target, cost=2, resource=1)
+
+        result = nx.resource_constrained_shortest_path(G, source, target, 2)
+        assert result.path.node_path == [source, middle, target]
+
+    def test_invalid_inputs_and_missing_attributes(self):
+        G = nx.path_graph(3, create_using=nx.DiGraph)
+        G[0][1]["cost"] = 0
+        G[1][2]["cost"] = 1
+        G[1][2]["resource"] = 0
+
+        with pytest.raises(nx.NetworkXNotImplemented):
+            nx.resource_constrained_shortest_path(nx.Graph(), 0, 1, 1)
+        with pytest.raises(nx.NodeNotFound):
+            nx.resource_constrained_shortest_path(G, 9, 2, 1)
+        with pytest.raises(nx.NodeNotFound):
+            nx.resource_constrained_shortest_path(G, 0, 9, 1)
+        with pytest.raises(nx.NetworkXError, match="resource_budget"):
+            nx.resource_constrained_shortest_path(G, 0, 2, -1)
+        with pytest.raises(nx.NetworkXError, match="max_labels"):
+            nx.resource_constrained_shortest_path(G, 0, 2, 1, max_labels=0)
+        with pytest.raises(nx.NetworkXError, match="resource"):
+            nx.resource_constrained_shortest_path(G, 0, 2, 1)
+
+    def test_label_limit_reports_incomplete(self):
+        G = nx.DiGraph()
+        G.add_edge(0, 1, cost=1, resource=0)
+        G.add_edge(0, 2, cost=0, resource=1)
+        G.add_edge(1, 3, cost=0, resource=1)
+        G.add_edge(2, 3, cost=1, resource=0)
+
+        result = nx.resource_constrained_shortest_path(G, 0, 3, 1, max_labels=2)
+        assert not result.complete
+        assert result.max_labels == 2
+        assert result.pareto_frontier == ()
+
+    def test_label_limit_with_incumbent_is_not_exact(self):
+        G = nx.DiGraph()
+        G.add_edge("s", "a", cost=1, resource=0)
+        G.add_edge("a", "t", cost=0, resource=1)
+        G.add_edge("s", "b", cost=9, resource=0)
+        G.add_edge("b", "t", cost=0, resource=1)
+        G.add_edge("b", "c", cost=0, resource=1)
+
+        result = nx.resource_constrained_shortest_path(
+            G, "s", "t", 1, pareto_frontier=True, max_labels=4
+        )
+        assert result.path is not None
+        assert not result.complete
+        assert result.path.node_path == ["s", "a", "t"]
+        assert result.pareto_frontier[0].node_path == ["s", "a", "t"]
+
+    def test_custom_and_callable_edge_attributes(self):
+        G = nx.DiGraph()
+        G.add_edge(0, 1, price=1, usage=1, allowed=True)
+        G.add_edge(0, 2, price=9, usage=0, allowed=False)
+        G.add_edge(1, 2, price=1, usage=1, allowed=True)
+        result = nx.resource_constrained_shortest_path(
+            G,
+            0,
+            2,
+            2,
+            cost=lambda u, v, d: d["price"] if d["allowed"] else None,
+            resource="usage",
+        )
+        assert result.path.node_path == [0, 1, 2]
+        assert (result.path.cost, result.path.resource) == (2, 2)
+
+    @pytest.mark.parametrize(
+        ("edge_attr", "bad_value"),
+        [("cost", -1), ("cost", float("nan")), ("resource", float("inf"))],
+    )
+    def test_invalid_edge_values(self, edge_attr, bad_value):
+        G = nx.DiGraph()
+        G.add_edge(0, 1, cost=0, resource=0)
+        G.add_edge(1, 2, cost=0, resource=0)
+        G[0][1][edge_attr] = bad_value
+        with pytest.raises(nx.NetworkXError, match=edge_attr):
+            nx.resource_constrained_shortest_path(G, 0, 2, 0)
+
+    def test_zero_to_zero_path_and_boolean_weights(self):
+        G = nx.DiGraph()
+        G.add_edge(0, 1, cost=True, resource=False)
+        G.add_edge(1, 0, cost=False, resource=True)
+
+        result = nx.resource_constrained_shortest_path(G, 0, 0, 0)
+        assert result.path.node_path == [0]
+        assert (result.path.cost, result.path.resource) == (0, 0)
+
+        cycle_result = nx.resource_constrained_shortest_path(G, 0, 0, 2)
+        assert cycle_result.path.node_path == [0]
+        assert cycle_result.label_count == 1
