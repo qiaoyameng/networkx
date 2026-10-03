@@ -226,6 +226,23 @@ A* Algorithm
    astar_path
    astar_path_length
 
+Scheduled Transit
+-----------------
+
+Edges carry lists of scheduled ``(departure, arrival)`` services and the
+traveller may wait at nodes for a later service.  Timetables are preprocessed
+into a FIFO earliest-arrival (optimal waiting) function, then searched with a
+Dijkstra-style label-setting algorithm.
+
+.. automodule:: networkx.algorithms.shortest_paths.transit
+.. autosummary::
+   :toctree: generated/
+
+   earliest_arrival
+   TransitTimetable
+   TransitRoute
+   TransitLeg
+
 Notes on Multi-Target Shortest Path Queries
 -------------------------------------------
 
