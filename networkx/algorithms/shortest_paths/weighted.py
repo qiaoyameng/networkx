@@ -5,11 +5,13 @@ Shortest path algorithms for weighted graphs.
 from collections import deque
 from heapq import heappop, heappush
 from itertools import count, islice
+from typing import NamedTuple
 
 import networkx as nx
 from networkx.algorithms.shortest_paths.generic import _build_paths_from_predecessors
 
 __all__ = [
+    "ConstrainedShortestPathResult",
     "dijkstra_path",
     "dijkstra_path_length",
     "bidirectional_dijkstra",
@@ -35,6 +37,7 @@ __all__ = [
     "find_negative_cycle",
     "goldberg_radzik",
     "johnson",
+    "constrained_shortest_path",
 ]
 
 
@@ -78,7 +81,367 @@ def _weight_function(G, weight):
     return lambda u, v, data: data.get(weight, 1)
 
 
-@nx._dispatchable(edge_attrs="weight")
+class ConstrainedShortestPathResult(NamedTuple):
+    """Result of a label-constrained shortest-path search.
+
+    Fields
+    ------
+    length : number
+        Sum of the weights of the edges in the path.
+    path : list
+        Graph nodes in the path, including both endpoints. The alias
+        ``nodes`` returns the same list.
+    edges : list
+        Edges in the path. For multigraphs each edge is ``(u, v, key)``;
+        otherwise each edge is ``(u, v)``. The alias ``edge_keys`` contains
+        the key of each selected multigraph edge, and ``None`` elsewhere.
+    labels : list
+        Label of each selected edge, in path order.
+    automaton_states : list
+        Automaton state associated with each graph node. Epsilon transitions
+        used at the end of the path are reflected in the final state.
+    """
+
+    length: float
+    path: list
+    edges: list
+    labels: list
+    automaton_states: list
+
+    @property
+    def nodes(self):
+        return self.path
+
+    @property
+    def edge_keys(self):
+        return [edge[2] if len(edge) == 3 else None for edge in self.edges]
+
+
+def _normalize_automaton(states, transitions, initial_state, accepting_states):
+    """Return adjacency and validated state sets for a finite automaton."""
+    state_set = set(states)
+    if initial_state not in state_set:
+        raise nx.NetworkXError(
+            f"initial automaton state {initial_state!r} is not in states"
+        )
+
+    accepting_set = set(accepting_states)
+    unknown = accepting_set - state_set
+    if unknown:
+        state = next(iter(unknown))
+        raise nx.NetworkXError(
+            f"accepting automaton state {state!r} is not in states"
+        )
+
+    adjacency = {state: {} for state in state_set}
+    for source, symbol, target in transitions:
+        if source not in state_set:
+            raise nx.NetworkXError(
+                f"automaton transition source {source!r} is not in states"
+            )
+        if target not in state_set:
+            raise nx.NetworkXError(
+                f"automaton transition target {target!r} is not in states"
+            )
+        adjacency[source].setdefault(symbol, set()).add(target)
+    return adjacency, accepting_set
+
+
+_EPSILON = object()
+
+
+def _automaton_edge_label(label):
+    if callable(label):
+        return label
+
+    def edge_label(u, v, data):
+        return data.get(label)
+
+    return edge_label
+
+
+@nx._dispatchable(edge_attrs={"weight": None, "label": None})
+def constrained_shortest_path(
+    G,
+    source,
+    target,
+    *,
+    automaton_states,
+    automaton_transitions,
+    initial_automaton_state,
+    accepting_automaton_states,
+    weight="weight",
+    label="label",
+    epsilon=None,
+    max_product_states=None,
+):
+    """Find the shortest path accepted by a finite automaton.
+
+    The search is performed in the product of the graph and the automaton.
+    A graph edge with label ``symbol`` may be used from automaton state ``p``
+    to ``q`` when the automaton has a transition ``(p, symbol, q)``.
+
+    Parameters
+    ----------
+    G : NetworkX graph
+        The graph in which to find a path.
+
+    source : node
+        Starting graph node.
+
+    target : node
+        Ending graph node.
+
+    automaton_states : iterable of hashable objects
+        States of the finite automaton.
+
+    automaton_transitions : iterable of tuples
+        Automaton transitions, each given as ``(state, symbol, next_state)``.
+        Multiple transitions with the same state and symbol are supported.
+
+    initial_automaton_state : state
+        Automaton state before traversing any graph edge.
+
+    accepting_automaton_states : iterable of states
+        States at which an empty path is accepted and, after taking the
+        epsilon closure, a completed path is accepted.
+
+    weight : string or callable, optional (default="weight")
+        Edge attribute used as the weight. If callable, it must accept
+        ``(u, v, edge_data)`` for each individual multigraph edge and return
+        a non-negative number, or ``None`` to hide the edge.
+
+    label : string or callable, optional (default="label")
+        Edge attribute containing the automaton symbol. If callable, it must
+        accept ``(u, v, edge_data)`` for each individual multigraph edge.
+        A missing ``label`` attribute has value ``None``.
+
+    epsilon : hashable object, optional
+        Symbol used for epsilon automaton transitions. Epsilon transitions do
+        not consume a graph edge and have zero cost. If ``None`` (the
+        default), no symbol is treated as epsilon; use a value that does not
+        appear as a graph-edge label, such as ``"epsilon"``.
+
+    max_product_states : positive integer, optional
+        Maximum number of distinct ``(graph node, automaton state)`` states
+        explored. The product is created lazily, so only reachable states are
+        counted.
+
+    Returns
+    -------
+    result : ConstrainedShortestPathResult
+        A named tuple with fields ``length``, ``path``, ``edges``, ``labels``,
+        and ``automaton_states``. For multigraphs, ``edges`` contains
+        ``(u, v, key)`` tuples; otherwise it contains ``(u, v)`` tuples.
+
+    Raises
+    ------
+    NodeNotFound
+        If `source` or `target` is not in `G`.
+
+    NetworkXError
+        If an automaton state reference is invalid or `max_product_states`
+        is not a positive integer.
+
+    NetworkXAlgorithmError
+        If the search reaches `max_product_states` without finding an
+        accepted path.
+
+    NetworkXNoPath
+        If no automaton-accepted path exists.
+
+    Examples
+    --------
+    Require one ``read`` edge to reach the target:
+
+    >>> G = nx.DiGraph()
+    >>> G.add_edge("home", "file", label="read")
+    >>> transitions = [
+    ...     (0, "read", 1),
+    ... ]
+    >>> result = nx.constrained_shortest_path(
+    ...     G,
+    ...     "home",
+    ...     "file",
+    ...     automaton_states=[0, 1],
+    ...     automaton_transitions=transitions,
+    ...     initial_automaton_state=0,
+    ...     accepting_automaton_states=[1],
+    ... )
+    >>> result.nodes
+    ['home', 'file']
+    >>> result.labels
+    ['read']
+    >>> result.automaton_states
+    [0, 1]
+    """
+    if source not in G:
+        raise nx.NodeNotFound(f"source node {source} not in graph")
+    if target not in G:
+        raise nx.NodeNotFound(f"target node {target} not in graph")
+    if max_product_states is not None and (
+        not isinstance(max_product_states, int)
+        or isinstance(max_product_states, bool)
+        or max_product_states <= 0
+    ):
+        raise nx.NetworkXError(
+            "max_product_states must be a positive integer or None"
+        )
+
+    automaton, accepting = _normalize_automaton(
+        automaton_states,
+        automaton_transitions,
+        initial_automaton_state,
+        accepting_automaton_states,
+    )
+    if callable(weight):
+        weight_function = weight
+    else:
+        def weight_function(u, v, data):
+            return data.get(weight, 1)
+
+    label_function = _automaton_edge_label(label)
+    if epsilon is None:
+        epsilon = _EPSILON
+
+    distances = {}
+    predecessors = {}
+    heap = []
+    counter = count()
+    target_product_state = None
+    cap_reached = False
+    initial_product_state = (source, initial_automaton_state)
+    distances[initial_product_state] = 0
+    heappush(heap, (0, next(counter), initial_product_state))
+    if source == target and initial_automaton_state in accepting:
+        target_product_state = initial_product_state
+
+    while heap and target_product_state is None:
+        current_distance, _, current_product_state = heappop(heap)
+        if current_distance > distances.get(current_product_state, float("inf")):
+            continue
+
+        current_node, current_state = current_product_state
+        if current_node == target and current_state in accepting:
+            target_product_state = current_product_state
+            break
+
+        for next_state in automaton[current_state].get(epsilon, ()):
+            next_product_state = (current_node, next_state)
+            if next_product_state in distances and (
+                current_distance >= distances[next_product_state]
+            ):
+                continue
+            if max_product_states is not None and (
+                len(distances) >= max_product_states
+            ):
+                cap_reached = True
+                continue
+            distances[next_product_state] = current_distance
+            predecessors[next_product_state] = (current_product_state, None)
+            heappush(heap, (current_distance, next(counter), next_product_state))
+
+        for next_node, edges in G[current_node].items():
+            edge_items = (
+                edges.items()
+                if G.is_multigraph()
+                else ((None, edges),)
+            )
+            for edge_key, edge_data in edge_items:
+                edge_weight = weight_function(current_node, next_node, edge_data)
+                if edge_weight is None:
+                    continue
+                if edge_weight < 0 or edge_weight != edge_weight:
+                    raise ValueError(
+                        "edge weights must be non-negative for "
+                        "constrained_shortest_path"
+                    )
+
+                edge_symbol = label_function(current_node, next_node, edge_data)
+                if edge_symbol == epsilon:
+                    raise nx.NetworkXError(
+                        "epsilon symbol cannot be used as a graph-edge label"
+                    )
+                symbol_states = automaton[current_state].get(edge_symbol)
+                if not symbol_states:
+                    continue
+
+                next_distance = current_distance + edge_weight
+                for next_state in symbol_states:
+                    next_product_state = (next_node, next_state)
+                    if (
+                        next_product_state in distances
+                        and next_distance >= distances[next_product_state]
+                    ):
+                        continue
+                    if max_product_states is not None and (
+                        len(distances) >= max_product_states
+                    ):
+                        cap_reached = True
+                        continue
+
+                    distances[next_product_state] = next_distance
+                    edge = (
+                        (current_node, next_node, edge_key)
+                        if G.is_multigraph()
+                        else (current_node, next_node)
+                    )
+                    edge_info = (edge_key, edge_symbol, edge)
+                    predecessors[next_product_state] = (
+                        current_product_state,
+                        edge_info,
+                    )
+                    heappush(
+                        heap,
+                        (next_distance, next(counter), next_product_state),
+                    )
+
+    if target_product_state is None and cap_reached:
+        raise nx.NetworkXAlgorithmError(
+            f"product-state limit reached: {max_product_states}"
+        )
+    if target_product_state is None:
+        raise nx.NetworkXNoPath(
+            f"No automaton-accepted path from {source} to {target}."
+        )
+
+    path = []
+    edges = []
+    labels = []
+    automaton_states = []
+    current = target_product_state
+    pending_state = target_product_state[1]
+    while True:
+        previous = predecessors.get(current)
+        if previous is None:
+            path.append(current[0])
+            automaton_states.append(pending_state)
+            break
+        previous_product_state, edge_info = previous
+        if edge_info is None:
+            current = previous_product_state
+            continue
+        edge_key, edge_symbol, edge = edge_info
+        path.append(current[0])
+        automaton_states.append(pending_state)
+        edges.append(edge)
+        labels.append(edge_symbol)
+        pending_state = previous_product_state[1]
+        current = previous_product_state
+
+    path.reverse()
+    edges.reverse()
+    labels.reverse()
+    automaton_states.reverse()
+    return ConstrainedShortestPathResult(
+        distances[target_product_state],
+        path,
+        edges,
+        labels,
+        automaton_states,
+    )
+
+
 def dijkstra_path(G, source, target, weight="weight"):
     """Returns the shortest weighted path from source to target in G.
 

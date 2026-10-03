@@ -186,6 +186,7 @@ Advanced Interface
    all_pairs_dijkstra_path
    all_pairs_dijkstra_path_length
    bidirectional_dijkstra
+   constrained_shortest_path
 
    bellman_ford_path
    bellman_ford_path_length
