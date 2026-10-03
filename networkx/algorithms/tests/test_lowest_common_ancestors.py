@@ -457,3 +457,141 @@ def test_lca_dont_rely_on_single_successor():
     G.add_nodes_from(range(4))
     G.add_edges_from([(2, 0), (2, 1), (3, 1), (3, 0), (3, 2)])
     assert nx.lowest_common_ancestor(G, 0, 1) == 2
+
+
+class TestLowestCommonAncestorIndex:
+    @classmethod
+    def setup_class(cls):
+        # Two incomparable lowest common ancestors (a, b) of x and y,
+        # plus a higher common ancestor h that must be filtered out.
+        cls.DG = nx.DiGraph(
+            [("h", "a"), ("h", "b"), ("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")]
+        )
+
+    def test_multiple_lowest_common_ancestors(self):
+        index = nx.LowestCommonAncestorIndex(self.DG)
+        assert index.query("x", "y") == {"a", "b"}
+        assert index.query("y", "x") == {"a", "b"}
+
+    def test_self_pair_includes_self(self):
+        index = nx.LowestCommonAncestorIndex(self.DG)
+        for node in self.DG:
+            assert index.query(node, node) == {node}
+
+    def test_ancestor_descendant_pair(self):
+        index = nx.LowestCommonAncestorIndex(self.DG)
+        assert index.query("h", "x") == {"h"}
+        assert index.query("a", "x") == {"a"}
+
+    def test_no_common_ancestor_returns_empty_set(self):
+        G = nx.DiGraph([(0, 1), (2, 3)])
+        index = nx.LowestCommonAncestorIndex(G)
+        assert index.query(1, 3) == set()
+        assert index.query(0, 2) == set()
+
+    def test_query_pairs(self):
+        index = nx.LowestCommonAncestorIndex(self.DG)
+        ans = dict(index.query_pairs([("x", "y"), ("h", "a"), ("x", "x")]))
+        assert ans == {("x", "y"): {"a", "b"}, ("h", "a"): {"h"}, ("x", "x"): {"x"}}
+
+    def test_nodes_need_not_be_sortable(self):
+        # Mixed node types cannot be ordered; results must not depend on
+        # sorting nodes or on topological numbering.
+        G = nx.DiGraph([(0, "a"), ("a", (1, 2)), (0, (1, 2))])
+        index = nx.LowestCommonAncestorIndex(G)
+        assert index.query("a", (1, 2)) == {"a"}
+        assert index.query((1, 2), 0) == {0}
+
+    def test_lowest_is_not_highest_topological_number(self):
+        # h has the smallest topological number but is the highest
+        # ancestor; a and b are lower and must be kept instead.
+        G = nx.DiGraph([("h", "a"), ("h", "b"), ("a", "z"), ("b", "z")])
+        index = nx.LowestCommonAncestorIndex(G)
+        assert index.query("a", "b") == {"h"}
+        assert index.query("z", "a") == {"a"}
+
+    def test_invalid_nodes(self):
+        index = nx.LowestCommonAncestorIndex(self.DG)
+        pytest.raises(nx.NodeNotFound, index.query, "x", "missing")
+        pytest.raises(nx.NodeNotFound, index.query, "missing", "also-missing")
+        pytest.raises(nx.NodeNotFound, dict, index.query_pairs([("x", "missing")]))
+
+    def test_null_graph(self):
+        pytest.raises(
+            nx.NetworkXPointlessConcept, nx.LowestCommonAncestorIndex, nx.DiGraph()
+        )
+
+    def test_cycle_graph(self):
+        G = nx.cycle_graph(3, create_using=nx.DiGraph)
+        pytest.raises(nx.NetworkXError, nx.LowestCommonAncestorIndex, G)
+
+    def test_undirected_not_implemented(self):
+        pytest.raises(
+            nx.NetworkXNotImplemented, nx.LowestCommonAncestorIndex, nx.Graph([(0, 1)])
+        )
+
+    def test_stale_index_after_mutation(self):
+        G = nx.DiGraph([(0, 1)])
+        index = nx.LowestCommonAncestorIndex(G)
+        assert index.query(0, 1) == {0}
+        G.add_edge(1, 2)
+        pytest.raises(nx.NetworkXError, index.query, 0, 1)
+        index.rebuild()
+        assert index.query(0, 2) == {0}
+        assert index.query(1, 2) == {1}
+
+    def test_rebuild_after_cycle_introduced(self):
+        G = nx.DiGraph([(0, 1), (1, 2)])
+        index = nx.LowestCommonAncestorIndex(G)
+        G.add_edge(2, 0)
+        pytest.raises(nx.NetworkXError, index.rebuild)
+
+
+class TestAllLowestCommonAncestors:
+    @classmethod
+    def setup_class(cls):
+        # Two incomparable lowest common ancestors (a, b) of x and y,
+        # plus a higher common ancestor h that must be filtered out.
+        cls.DG = nx.DiGraph(
+            [("h", "a"), ("h", "b"), ("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")]
+        )
+
+    def test_pairs_argument(self):
+        ans = dict(nx.all_lowest_common_ancestors(self.DG, pairs=[("x", "y")]))
+        assert ans == {("x", "y"): {"a", "b"}}
+
+    def test_all_pairs_default(self):
+        ans = dict(nx.all_lowest_common_ancestors(self.DG))
+        assert ans[("x", "y")] == {"a", "b"}
+        for node in self.DG:
+            assert ans[(node, node)] == {node}
+        assert ans[("h", "x")] == {"h"}
+        assert ans[("a", "b")] == {"h"}
+
+    def test_consistent_with_lowest_common_ancestor(self):
+        G = nx.DiGraph()
+        nx.add_path(G, (0, 1, 2, 3))
+        nx.add_path(G, (0, 4, 3))
+        ans = dict(nx.all_lowest_common_ancestors(G))
+        for (n1, n2), lcas in ans.items():
+            assert nx.lowest_common_ancestor(G, n1, n2) in lcas
+
+    def test_invalid_pairs(self):
+        pytest.raises(
+            nx.NodeNotFound,
+            nx.all_lowest_common_ancestors,
+            self.DG,
+            [("x", "missing")],
+        )
+
+    def test_null_graph(self):
+        G = nx.null_graph(create_using=nx.DiGraph)
+        pytest.raises(nx.NetworkXPointlessConcept, nx.all_lowest_common_ancestors, G)
+
+    def test_cycle_graph(self):
+        G = nx.cycle_graph(3, create_using=nx.DiGraph)
+        pytest.raises(nx.NetworkXError, nx.all_lowest_common_ancestors, G)
+
+    def test_undirected_not_implemented(self):
+        G = nx.Graph([(0, 1)])
+        pytest.raises(nx.NetworkXNotImplemented, nx.all_lowest_common_ancestors, G)

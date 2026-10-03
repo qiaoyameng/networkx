@@ -9,8 +9,10 @@ from networkx.utils import UnionFind, arbitrary_element, not_implemented_for
 
 __all__ = [
     "all_pairs_lowest_common_ancestor",
+    "all_lowest_common_ancestors",
     "tree_all_pairs_lowest_common_ancestor",
     "lowest_common_ancestor",
+    "LowestCommonAncestorIndex",
 ]
 
 
@@ -159,6 +161,237 @@ def lowest_common_ancestor(G, node1, node2, default=None):
         assert len(ans) == 1
         return ans[0][1]
     return default
+
+
+class LowestCommonAncestorIndex:
+    """Preprocessed index for lowest common ancestor queries on a DAG.
+
+    Unlike `lowest_common_ancestor`, which returns a single lowest common
+    ancestor, queries on this index return the full set of lowest common
+    ancestors: the common ancestors of the two nodes that have no other
+    common ancestor among their descendants. A DAG may have several
+    mutually incomparable lowest common ancestors for a pair of nodes.
+
+    The ancestor information of the DAG is preprocessed once at
+    construction and reused by every query, so individual queries do not
+    enumerate paths in the graph.
+
+    Parameters
+    ----------
+    G : NetworkX directed graph
+        The directed acyclic graph to index.
+
+    Raises
+    ------
+    NetworkXNotImplemented
+        If `G` is undirected.
+    NetworkXPointlessConcept
+        If `G` is null.
+    NetworkXError
+        If `G` is not a DAG.
+
+    Examples
+    --------
+    >>> G = nx.DiGraph([(0, 1), (0, 2), (1, 3), (2, 3)])
+    >>> index = nx.LowestCommonAncestorIndex(G)
+    >>> index.query(1, 2)
+    {0}
+    >>> index.query(3, 3)
+    {3}
+
+    Notes
+    -----
+    The index is a snapshot of the graph at construction (or at the last
+    `rebuild` call) and is not kept in sync with the graph. After
+    mutating the graph, call `rebuild` before querying again. As a
+    best-effort guard, queries raise `NetworkXError` if the number of
+    nodes or edges of the graph changed since the index was built, but
+    mutations that preserve both counts are not detected; `rebuild` is
+    the explicit invalidation rule.
+
+    Preprocessing takes $O(V (V + E))$ time and $O(V^2)$ space in the
+    worst case. Each query intersects two precomputed ancestor sets and
+    filters out non-lowest members, without enumerating paths.
+
+    See Also
+    --------
+    all_lowest_common_ancestors
+    lowest_common_ancestor
+    all_pairs_lowest_common_ancestor
+    """
+
+    def __init__(self, G):
+        if not G.is_directed():
+            raise nx.NetworkXNotImplemented("LCA only defined on directed graphs.")
+        self._graph = G
+        self.rebuild()
+
+    def rebuild(self):
+        """(Re)compute the preprocessed ancestor information from the graph.
+
+        This must be called after any mutation of the underlying graph
+        for queries to reflect the current graph structure.
+
+        Raises
+        ------
+        NetworkXPointlessConcept
+            If the graph is null.
+        NetworkXError
+            If the graph is not a DAG.
+        """
+        G = self._graph
+        if not nx.is_directed_acyclic_graph(G):
+            raise nx.NetworkXError("LCA only defined on directed acyclic graphs.")
+        if len(G) == 0:
+            raise nx.NetworkXPointlessConcept("LCA meaningless on null graphs.")
+        # Ancestor sets (including each node itself) in topological order,
+        # so each set is built from its predecessors' sets without
+        # enumerating paths.
+        ancestors = {}
+        for node in nx.topological_sort(G):
+            reachable = {node}
+            for pred in G.predecessors(node):
+                reachable |= ancestors[pred]
+            ancestors[node] = reachable
+        self._ancestors = ancestors
+        self._fingerprint = (len(G), G.number_of_edges())
+
+    def query(self, node1, node2):
+        """Return the set of lowest common ancestors of `node1` and `node2`.
+
+        A node is a lowest common ancestor of the pair if it is an
+        ancestor of (or equal to) both nodes and none of its descendants
+        is also a common ancestor of the pair. If the nodes have no
+        common ancestor, the empty set is returned.
+
+        Parameters
+        ----------
+        node1, node2 : nodes in the graph.
+
+        Returns
+        -------
+        set
+            The lowest common ancestors of `node1` and `node2`.
+
+        Raises
+        ------
+        NodeNotFound
+            If `node1` or `node2` is not in the graph.
+        NetworkXError
+            If the graph was mutated since the index was built or last
+            rebuilt (best-effort check; see class notes).
+        """
+        G = self._graph
+        if (len(G), G.number_of_edges()) != self._fingerprint:
+            raise nx.NetworkXError(
+                "The graph changed since the index was built; call rebuild()."
+            )
+        ancestors = self._ancestors
+        missing = [n for n in (node1, node2) if n not in ancestors]
+        if missing:
+            raise nx.NodeNotFound(f"Node(s) {missing} not in G.")
+        common = ancestors[node1] & ancestors[node2]
+        return {
+            ancestor
+            for ancestor in common
+            if not any(
+                ancestor in ancestors[other] for other in common if other != ancestor
+            )
+        }
+
+    def query_pairs(self, pairs):
+        """Yield the lowest common ancestor set for each pair in `pairs`.
+
+        Parameters
+        ----------
+        pairs : iterable of pairs of nodes
+            The pairs of nodes of interest.
+
+        Yields
+        ------
+        ((node1, node2), lcas) : 2-tuple
+            Where lcas is the set of lowest common ancestors of node1 and
+            node2.
+
+        Raises
+        ------
+        NodeNotFound
+            If any node in `pairs` is not in the graph.
+        """
+        for node1, node2 in pairs:
+            yield (node1, node2), self.query(node1, node2)
+
+
+@not_implemented_for("undirected")
+@nx._dispatchable
+def all_lowest_common_ancestors(G, pairs=None):
+    """Return the set of lowest common ancestors of all pairs or the provided pairs.
+
+    Unlike `all_pairs_lowest_common_ancestor`, which returns a single
+    lowest common ancestor per pair, this function returns the full set
+    of lowest common ancestors: the common ancestors of the pair that
+    have no other common ancestor among their descendants.
+
+    Parameters
+    ----------
+    G : NetworkX directed graph
+
+    pairs : iterable of pairs of nodes, optional (default: all pairs)
+        The pairs of nodes of interest.
+        If None, will find the lowest common ancestors of all pairs of nodes.
+
+    Yields
+    ------
+    ((node1, node2), lcas) : 2-tuple
+        Where lcas is the set of lowest common ancestors of node1 and
+        node2. Note that for the default case, the order of the node pair
+        is not considered, e.g. you will not get both ``(a, b)`` and
+        ``(b, a)``.
+
+    Raises
+    ------
+    NetworkXPointlessConcept
+        If `G` is null.
+    NetworkXError
+        If `G` is not a DAG.
+    NodeNotFound
+        If any node in `pairs` is not in `G`.
+
+    Examples
+    --------
+    >>> G = nx.DiGraph([(0, 1), (0, 2), (1, 3), (2, 3)])
+    >>> dict(nx.all_lowest_common_ancestors(G, pairs=[(1, 2), (3, 3)]))
+    {(1, 2): {0}, (3, 3): {3}}
+
+    For repeated queries, build a `LowestCommonAncestorIndex` once and
+    reuse it instead of calling this function repeatedly.
+
+    Notes
+    -----
+    Only defined on non-null directed acyclic graphs.
+
+    See Also
+    --------
+    LowestCommonAncestorIndex
+    lowest_common_ancestor
+    all_pairs_lowest_common_ancestor
+    """
+    index = LowestCommonAncestorIndex(G)
+
+    if pairs is None:
+        pairs = combinations_with_replacement(G, 2)
+    else:
+        # Convert iterator to iterable, if necessary. Trim duplicates.
+        pairs = dict.fromkeys(pairs)
+        # Verify that each of the nodes in the provided pairs is in G
+        nodeset = set(G)
+        for pair in pairs:
+            if set(pair) - nodeset:
+                raise nx.NodeNotFound(
+                    f"Node(s) {set(pair) - nodeset} from pair {pair} not in G."
+                )
+
+    return index.query_pairs(pairs)
 
 
 @not_implemented_for("undirected")
