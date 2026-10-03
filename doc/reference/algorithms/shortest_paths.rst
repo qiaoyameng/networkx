@@ -202,6 +202,16 @@ Advanced Interface
    johnson
 
 
+Replacement Paths
+-----------------
+
+.. automodule:: networkx.algorithms.shortest_paths.replacement
+.. autosummary::
+   :toctree: generated/
+
+   replacement_paths
+
+
 Dense Graphs
 ------------
 
