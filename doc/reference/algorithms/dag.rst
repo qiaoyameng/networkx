@@ -10,6 +10,7 @@ Directed Acyclic Graphs
    antichain_width
    descendants
    topological_sort
+   IncrementalTopologicalOrder
    topological_generations
    all_topological_sorts
    lexicographical_topological_sort

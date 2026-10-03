@@ -17,6 +17,7 @@ __all__ = [
     "descendants",
     "ancestors",
     "topological_sort",
+    "IncrementalTopologicalOrder",
     "lexicographical_topological_sort",
     "all_topological_sorts",
     "topological_generations",
@@ -1460,3 +1461,372 @@ def colliders(G):
     for node in G.nodes:
         for p1, p2 in combinations(G.predecessors(node), 2):
             yield (p1, node, p2)
+
+
+class IncrementalTopologicalOrder:
+    """Maintains a topological order of a directed graph under incremental updates.
+
+    This class wraps a directed graph and keeps a valid topological ordering
+    of its nodes up to date as nodes and edges are inserted and as edges are
+    removed. The initial ordering is computed with one full topological sort.
+    Afterwards, inserting an edge that already agrees with the current order
+    is accepted directly, and inserting a "backward" edge only searches and
+    rearranges the affected interval of the ordering instead of re-sorting
+    the whole graph.
+
+    All structural changes to the graph must go through this class. The
+    maintainer owns the graph: mutating the wrapped graph directly is
+    detected (via node/edge counts) and further use then raises
+    :exc:`NetworkXError`.
+
+    Parameters
+    ----------
+    graph : nx.DiGraph, optional (default=None)
+        The directed graph to maintain an ordering for. If None, a new empty
+        :class:`nx.DiGraph` is created. The maintainer takes ownership of the
+        graph; do not mutate it directly afterwards. Undirected graphs raise
+        :exc:`NetworkXError` and multigraphs raise
+        :exc:`NetworkXNotImplemented`.
+
+    Attributes
+    ----------
+    nodes_visited : int
+        Number of nodes explored by the local search of the most recent
+        mutation. It is 0 for updates that require no search (forward edge
+        insertions, node insertions, edge removals) and is bounded by the
+        size of the affected interval for backward edge insertions, which
+        demonstrates that a local insertion does not traverse the whole
+        graph.
+
+    Raises
+    ------
+    HasACycle
+        If the initial graph contains a cycle. The exception carries the
+        cycle as a list of nodes in its ``cycle`` attribute.
+
+    Examples
+    --------
+    >>> ito = nx.IncrementalTopologicalOrder()
+    >>> ito.add_edges_from([(0, 1), (1, 2), (0, 3)])
+    >>> ito.order
+    [0, 1, 2, 3]
+    >>> ito.add_edge(3, 2)  # backward edge: only the interval [1, 2, 3] is searched
+    >>> ito.order
+    [0, 1, 3, 2]
+    >>> ito.add_edge(2, 0)  # would close a cycle
+    Traceback (most recent call last):
+    ...
+    networkx.exception.HasACycle: Adding edge (2, 0) would create a cycle: [2, 0, 1, 2]
+    >>> ito.order  # graph and order are unchanged after a rejected edge
+    [0, 1, 3, 2]
+
+    Notes
+    -----
+    Nodes are never compared with each other, so node objects do not need to
+    be orderable; only hashing and equality are required.
+
+    Duplicate edge insertions are treated as in :class:`nx.DiGraph`: they
+    only update the edge data and leave the ordering untouched. Inserting a
+    self-loop always raises :exc:`HasACycle`. Batch insertion via
+    :meth:`add_edges_from` is atomic: if any edge of the batch would create
+    a cycle, the graph and the ordering are restored to their state before
+    the call (updates to the data of pre-existing edges are not rolled
+    back). Edge removal never triggers a re-ordering; the current order
+    simply remains valid.
+
+    The reordering performed for backward edges is based on the dynamic
+    topological sort algorithm of Pearce and Kelly [1]_: a forward search
+    from the target of the new edge and a backward search from its source,
+    both confined to the interval of the ordering spanned by the two
+    endpoints. The affected interval is then rewritten as the nodes reaching
+    the source (in their previous relative order), followed by the untouched
+    nodes, followed by the nodes reachable from the target.
+
+    References
+    ----------
+    .. [1] Pearce, D. J., & Kelly, P. H. J. (2006).
+       "A Dynamic Topological Sort Algorithm for Directed Acyclic Graphs".
+       *ACM Journal of Experimental Algorithmics*, 11.
+       https://doi.org/10.1145/1187436.1210590
+
+    See Also
+    --------
+    topological_sort, is_directed_acyclic_graph
+    """
+
+    def __init__(self, graph=None):
+        if graph is None:
+            graph = nx.DiGraph()
+        if not graph.is_directed():
+            raise nx.NetworkXError(
+                "IncrementalTopologicalOrder is only defined for directed graphs."
+            )
+        if graph.is_multigraph():
+            raise nx.NetworkXNotImplemented(
+                "IncrementalTopologicalOrder is not implemented for multigraphs."
+            )
+        self._graph = graph
+        try:
+            self._order = list(nx.topological_sort(graph))
+        except nx.NetworkXUnfeasible:
+            cycle_edges = nx.find_cycle(graph)
+            cycle = [cycle_edges[0][0]] + [v for _, v, *rest in cycle_edges]
+            raise self._cycle_error("Initial graph contains a cycle", cycle) from None
+        self._pos = dict(zip(self._order, range(len(self._order))))
+        self._node_count = graph.number_of_nodes()
+        self._edge_count = graph.number_of_edges()
+        self.nodes_visited = 0
+
+    @staticmethod
+    def _cycle_error(msg, cycle):
+        err = nx.HasACycle(f"{msg}: {cycle}")
+        err.cycle = cycle
+        return err
+
+    def _check_fresh(self):
+        G = self._graph
+        if (
+            G.number_of_nodes() != self._node_count
+            or G.number_of_edges() != self._edge_count
+        ):
+            raise nx.NetworkXError(
+                "The graph was modified outside of this IncrementalTopologicalOrder; "
+                "the maintained order may be invalid. Mutate the graph only through "
+                "the maintainer, or create a new maintainer."
+            )
+
+    @property
+    def graph(self):
+        """The graph maintained by this object. Do not mutate it directly."""
+        return self._graph
+
+    @property
+    def order(self):
+        """A list of the nodes in the current topological order."""
+        self._check_fresh()
+        return list(self._order)
+
+    def __iter__(self):
+        self._check_fresh()
+        return iter(self._order)
+
+    def __len__(self):
+        return len(self._order)
+
+    def __contains__(self, node):
+        return node in self._pos
+
+    def position(self, node):
+        """Returns the index of `node` in the current topological order."""
+        return self._pos[node]
+
+    def is_valid(self):
+        """Returns True if the maintained order is a valid topological order.
+
+        This performs a full O(V + E) check of every edge against the
+        maintained positions and is intended for verification, not for use
+        after every update.
+        """
+        self._check_fresh()
+        pos = self._pos
+        return len(self._order) == self._node_count and all(
+            pos[u] < pos[v] for u, v in self._graph.edges
+        )
+
+    def _append_node(self, node):
+        self._pos[node] = len(self._order)
+        self._order.append(node)
+        self._node_count += 1
+
+    def add_node(self, node, **attrs):
+        """Adds a single node, appending it to the end of the order.
+
+        Appending to the end always keeps the order valid. If the node is
+        already present, only its attributes are updated, matching
+        :meth:`nx.DiGraph.add_node`.
+        """
+        self._check_fresh()
+        self.nodes_visited = 0
+        if node not in self._graph:
+            self._append_node(node)
+        self._graph.add_node(node, **attrs)
+
+    def add_nodes_from(self, nodes_for_adding, **attrs):
+        """Adds nodes from an iterable, each appended to the end of the order.
+
+        Elements may be nodes or ``(node, attrdict)`` tuples, matching
+        :meth:`nx.DiGraph.add_nodes_from`.
+        """
+        self._check_fresh()
+        for n in nodes_for_adding:
+            if isinstance(n, tuple) and len(n) == 2 and isinstance(n[1], dict):
+                self.add_node(n[0], **{**attrs, **n[1]})
+            else:
+                self.add_node(n, **attrs)
+
+    def add_edge(self, u, v, **attrs):
+        """Adds the edge ``(u, v)``, updating the topological order.
+
+        If the edge already exists only its data is updated. If ``u`` already
+        precedes ``v`` in the maintained order, the edge is accepted without
+        any reordering. Otherwise only the interval of the order between the
+        two endpoints is searched and rearranged.
+
+        Nodes not already in the graph are added, as in
+        :meth:`nx.DiGraph.add_edge`.
+
+        Raises
+        ------
+        HasACycle
+            If the edge would create a cycle (this includes self-loops). The
+            actual cycle is available as a list of nodes in the ``cycle``
+            attribute of the exception, and both the graph and the
+            maintained order are left in their state before the call.
+        """
+        self._check_fresh()
+        self.nodes_visited = 0
+        G = self._graph
+        if u == v:
+            raise self._cycle_error(
+                f"Adding self-loop ({u}, {v}) creates a cycle", [u, u]
+            )
+        if G.has_edge(u, v):
+            G.add_edge(u, v, **attrs)
+            return
+        added_nodes = [n for n in (u, v) if n not in self._pos]
+        for n in added_nodes:
+            self._append_node(n)
+        segment = None
+        try:
+            if self._pos[u] > self._pos[v]:
+                segment, lo, hi = self._reorder_interval(u, v)
+        except nx.HasACycle:
+            for n in added_nodes:
+                self._order.pop()
+                del self._pos[n]
+                self._node_count -= 1
+            raise
+        G.add_edge(u, v, **attrs)
+        self._edge_count += 1
+        if segment is not None:
+            self._order[lo : hi + 1] = segment
+            for i in range(lo, hi + 1):
+                self._pos[self._order[i]] = i
+
+    def add_edges_from(self, ebunch_to_add, **attrs):
+        """Adds a batch of edges atomically.
+
+        Each element is a ``(u, v)`` or ``(u, v, datadict)`` tuple, matching
+        :meth:`nx.DiGraph.add_edges_from`. If any edge of the batch would
+        create a cycle, :exc:`HasACycle` is raised and the graph and the
+        maintained order are restored to their state before the call
+        (updates to the data of pre-existing edges are not rolled back).
+        """
+        self._check_fresh()
+        saved_order = list(self._order)
+        added_edges = []
+        added_nodes = []
+        try:
+            for e in ebunch_to_add:
+                u, v = e[0], e[1]
+                kw = dict(attrs)
+                if len(e) > 2:
+                    kw.update(e[2])
+                existed = self._graph.has_edge(u, v)
+                new_nodes = [n for n in (u, v) if n not in self._pos]
+                self.add_edge(u, v, **kw)
+                if not existed:
+                    added_edges.append((u, v))
+                added_nodes.extend(new_nodes)
+        except nx.HasACycle:
+            self._graph.remove_edges_from(added_edges)
+            self._graph.remove_nodes_from(added_nodes)
+            self._order = saved_order
+            self._pos = dict(zip(saved_order, range(len(saved_order))))
+            self._node_count = self._graph.number_of_nodes()
+            self._edge_count = self._graph.number_of_edges()
+            raise
+
+    def remove_edge(self, u, v):
+        """Removes the edge ``(u, v)``. The current order remains valid."""
+        self._check_fresh()
+        self.nodes_visited = 0
+        self._graph.remove_edge(u, v)
+        self._edge_count -= 1
+
+    def remove_edges_from(self, ebunch):
+        """Removes the given edges, ignoring those not in the graph."""
+        self._check_fresh()
+        self.nodes_visited = 0
+        for e in ebunch:
+            u, v = e[0], e[1]
+            if self._graph.has_edge(u, v):
+                self._graph.remove_edge(u, v)
+                self._edge_count -= 1
+
+    def _reorder_interval(self, u, v):
+        """Computes a valid reordering of the interval between v and u.
+
+        Searches forward from v and backward from u, both confined to the
+        interval of the order spanned by the endpoints, and returns the
+        rearranged interval as ``(segment, lo, hi)``. Raises :exc:`HasACycle`
+        with the actual cycle if the edge ``(u, v)`` would close a cycle.
+        """
+        G = self._graph
+        pos = self._pos
+        lo, hi = pos[v], pos[u]
+        interval = set(self._order[lo : hi + 1])
+        visited = 0
+        forward = set()
+        stack = [v]
+        while stack:
+            x = stack.pop()
+            if x in forward:
+                continue
+            forward.add(x)
+            visited += 1
+            for y in G._succ.get(x, ()):
+                if y in interval and y not in forward:
+                    stack.append(y)
+        backward = set()
+        stack = [u]
+        while stack:
+            x = stack.pop()
+            if x in backward:
+                continue
+            backward.add(x)
+            visited += 1
+            for y in G._pred.get(x, ()):
+                if y in interval and y not in backward:
+                    stack.append(y)
+        self.nodes_visited = visited
+        if forward & backward:
+            raise self._cycle_error(
+                f"Adding edge ({u}, {v}) would create a cycle",
+                self._cycle_path(u, v, interval),
+            )
+        segment = self._order[lo : hi + 1]
+        new_segment = (
+            [x for x in segment if x in backward]
+            + [x for x in segment if x not in backward and x not in forward]
+            + [x for x in segment if x in forward]
+        )
+        return new_segment, lo, hi
+
+    def _cycle_path(self, u, v, interval):
+        """Returns the cycle ``[u, v, ..., u]`` through the new edge (u, v)."""
+        parent = {v: None}
+        queue = deque([v])
+        while queue:
+            x = queue.popleft()
+            for y in self._graph._succ[x]:
+                if y in interval and y not in parent:
+                    parent[y] = x
+                    if y == u:
+                        path = [u]
+                        while path[-1] != v:
+                            path.append(parent[path[-1]])
+                        path.reverse()
+                        return [u] + path
+                    queue.append(y)
+        return [u, v]  # unreachable when forward & backward is nonempty

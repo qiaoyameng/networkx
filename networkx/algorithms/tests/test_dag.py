@@ -892,3 +892,233 @@ def test_colliders(edgelist, expected):
     G = nx.DiGraph(edgelist)
     colliders = set(nx.dag.colliders(G))
     assert colliders == expected
+
+
+
+class TestIncrementalTopologicalOrder:
+    def test_empty_init(self):
+        ito = nx.IncrementalTopologicalOrder()
+        assert len(ito) == 0
+        assert ito.order == []
+        assert ito.is_valid()
+        assert isinstance(ito.graph, nx.DiGraph)
+
+    def test_init_from_graph(self):
+        G = nx.DiGraph([(0, 1), (1, 2), (0, 2)])
+        ito = nx.IncrementalTopologicalOrder(G)
+        assert ito.graph is G
+        assert sorted(ito.order) == [0, 1, 2]
+        assert ito.is_valid()
+
+    def test_init_cyclic_graph_raises_with_cycle(self):
+        G = nx.DiGraph([(0, 1), (1, 2), (2, 0)])
+        with pytest.raises(nx.HasACycle) as excinfo:
+            nx.IncrementalTopologicalOrder(G)
+        cycle = excinfo.value.cycle
+        assert cycle[0] == cycle[-1]
+        assert set(cycle) == {0, 1, 2}
+
+    def test_undirected_rejected(self):
+        with pytest.raises(nx.NetworkXError):
+            nx.IncrementalTopologicalOrder(nx.Graph())
+
+    def test_multigraph_rejected(self):
+        with pytest.raises(nx.NetworkXNotImplemented):
+            nx.IncrementalTopologicalOrder(nx.MultiDiGraph())
+
+    def test_add_node_and_nodes_from(self):
+        ito = nx.IncrementalTopologicalOrder()
+        ito.add_node("a", color="red")
+        ito.add_nodes_from(["b", ("c", {"size": 3})], color="blue")
+        assert ito.order == ["a", "b", "c"]
+        assert ito.graph.nodes["a"]["color"] == "red"
+        assert ito.graph.nodes["c"]["size"] == 3
+        assert ito.graph.nodes["c"]["color"] == "blue"
+        # Re-adding an existing node only updates attributes.
+        ito.add_node("a", color="green")
+        assert ito.order == ["a", "b", "c"]
+        assert ito.graph.nodes["a"]["color"] == "green"
+        assert ito.nodes_visited == 0
+
+    def test_forward_edge_needs_no_search(self):
+        ito = nx.IncrementalTopologicalOrder(nx.DiGraph([(0, 1)]))
+        ito.add_edge(0, 2)  # new node appended at the end
+        assert ito.order == [0, 1, 2]
+        ito.add_edge(1, 2)  # already consistent with the order
+        assert ito.nodes_visited == 0
+        assert ito.order == [0, 1, 2]
+        assert ito.is_valid()
+
+    def test_duplicate_edge_is_noop(self):
+        ito = nx.IncrementalTopologicalOrder()
+        ito.add_edge(0, 1, weight=1)
+        order_before = ito.order
+        ito.add_edge(0, 1, weight=5)
+        assert ito.order == order_before
+        assert ito.graph.number_of_edges() == 1
+        assert ito.graph[0][1]["weight"] == 5
+        assert ito.nodes_visited == 0
+
+
+    def test_remove_edge_keeps_order(self):
+        ito = nx.IncrementalTopologicalOrder()
+        ito.add_edges_from([(0, 1), (1, 2), (0, 2)])
+        order_before = ito.order
+        ito.remove_edge(0, 2)
+        assert ito.order == order_before
+        assert ito.is_valid()
+        ito.remove_edges_from([(0, 1), (9, 9)])  # missing edges ignored
+        assert ito.is_valid()
+        with pytest.raises(nx.NetworkXError):
+            ito.remove_edge(0, 1)
+    def test_backward_edge_reorders_interval(self):
+        ito = nx.IncrementalTopologicalOrder()
+        ito.add_edges_from([(0, 1), (1, 2), (2, 3), (0, 4), (4, 3)])
+        assert ito.order == [0, 1, 2, 4, 3]
+        ito.add_edge(4, 1)  # backward edge, but no path 1 ~> 4 exists
+        assert ito.order == [0, 4, 1, 2, 3]
+        assert ito.is_valid()
+        # Only the interval between the endpoints was searched.
+        assert 0 < ito.nodes_visited <= 4
+
+    def test_backward_edge_with_new_source_node(self):
+        ito = nx.IncrementalTopologicalOrder(nx.DiGraph([(0, 1)]))
+        ito.add_edge(5, 0)  # new node appended, then moved before 0
+        assert ito.order == [5, 0, 1]
+        assert ito.is_valid()
+
+    def test_cycle_edge_raises_with_actual_cycle(self):
+        ito = nx.IncrementalTopologicalOrder()
+        ito.add_edges_from([(0, 1), (1, 2), (2, 3)])
+        edges_before = set(ito.graph.edges)
+        order_before = ito.order
+        with pytest.raises(nx.HasACycle) as excinfo:
+            ito.add_edge(3, 1)
+        cycle = excinfo.value.cycle
+        assert cycle == [3, 1, 2, 3]
+        # Every consecutive pair is an edge of the graph plus the new edge.
+        for x, y in pairwise(cycle):
+            assert (x, y) in edges_before or (x, y) == (3, 1)
+        # Graph and order are left in their pre-commit state.
+        assert set(ito.graph.edges) == edges_before
+        assert ito.order == order_before
+        assert ito.is_valid()
+
+    def test_self_loop_rejected(self):
+        ito = nx.IncrementalTopologicalOrder()
+        ito.add_node(0)
+        with pytest.raises(nx.HasACycle) as excinfo:
+            ito.add_edge(0, 0)
+        assert excinfo.value.cycle == [0, 0]
+        assert ito.graph.number_of_edges() == 0
+        # A self-loop on a missing node must not add the node.
+        with pytest.raises(nx.HasACycle):
+            ito.add_edge(7, 7)
+        assert 7 not in ito.graph
+
+    def test_add_edges_from_batch_success(self):
+        ito = nx.IncrementalTopologicalOrder()
+        ito.add_edges_from([(0, 1), (1, 2)], weight=3)
+        ito.add_edges_from([(2, 3, {"weight": 7}), (0, 4), "ab"])
+        assert ito.is_valid()
+        assert ito.graph[1][2]["weight"] == 3
+        assert ito.graph[2][3]["weight"] == 7
+        assert ito.graph.has_edge("a", "b")
+
+    def test_add_edges_from_batch_is_atomic(self):
+        ito = nx.IncrementalTopologicalOrder()
+        ito.add_edges_from([(0, 1), (1, 2)])
+        edges_before = set(ito.graph.edges)
+        nodes_before = set(ito.graph.nodes)
+        order_before = ito.order
+        with pytest.raises(nx.HasACycle):
+            ito.add_edges_from([(2, 3), (3, 0), (4, 5)])  # (3, 0) closes a cycle
+        assert set(ito.graph.edges) == edges_before
+        assert set(ito.graph.nodes) == nodes_before
+        assert ito.order == order_before
+        assert ito.is_valid()
+
+    def test_external_modification_detected(self):
+        G = nx.DiGraph([(0, 1)])
+        ito = nx.IncrementalTopologicalOrder(G)
+        G.add_edge(1, 2)  # mutation behind the maintainer's back
+        with pytest.raises(nx.NetworkXError, match="modified outside"):
+            ito.add_edge(2, 3)
+        with pytest.raises(nx.NetworkXError, match="modified outside"):
+            ito.order
+
+    def test_nodes_need_not_be_comparable(self):
+        class Token:
+            def __init__(self, name):
+                self.name = name
+
+            def __repr__(self):
+                return f"Token({self.name})"
+
+        tokens = [Token(str(i)) for i in range(6)]
+        ito = nx.IncrementalTopologicalOrder()
+        ito.add_nodes_from(tokens)
+        ito.add_edge(tokens[0], tokens[3])
+        ito.add_edge(tokens[3], tokens[5])
+        ito.add_edge(tokens[5], tokens[1])  # backward edge triggers reorder
+        assert ito.is_valid()
+        pos = ito.position
+        assert pos(tokens[0]) < pos(tokens[3]) < pos(tokens[5]) < pos(tokens[1])
+
+    def test_local_insert_does_not_scan_whole_graph(self):
+        # 980 isolated nodes followed by two chains of 10 nodes each.
+        n = 1000
+        edges = [(i, i + 1) for i in range(980, 989)]
+        edges += [(i, i + 1) for i in range(990, 999)]
+        ito = nx.IncrementalTopologicalOrder(nx.DiGraph(edges))
+        ito.add_nodes_from(range(980))
+        # Forward edge: accepted directly, no search at all.
+        ito.add_edge(0, 500)
+        assert ito.nodes_visited == 0
+        # Backward edge within the two chains: only the affected interval
+        # (the 20 chain nodes) is searched, not the whole 1000-node graph.
+        ito.add_edge(989, 990)
+        assert ito.is_valid()
+        assert 0 < ito.nodes_visited <= 20
+
+    def test_randomized_cross_validation(self):
+        import random
+        rng = random.Random(42)
+        ito = nx.IncrementalTopologicalOrder()
+        nodes = list(range(30))
+        ito.add_nodes_from(nodes)
+        for step in range(500):
+            op = rng.randrange(4)
+            if op == 0:
+                u, v = rng.sample(nodes, 2)
+                edges_before = set(ito.graph.edges)
+                order_before = ito.order
+                try:
+                    ito.add_edge(u, v)
+                except nx.HasACycle as err:
+                    # The reported cycle must be real in graph + new edge.
+                    for x, y in pairwise(err.cycle):
+                        assert (x, y) in edges_before or (x, y) == (u, v)
+                    assert err.cycle[0] == err.cycle[-1]
+                    # State is unchanged.
+                    assert set(ito.graph.edges) == edges_before
+                    assert ito.order == order_before
+                    # The edge really does close a cycle.
+                    H = nx.DiGraph(edges_before)
+                    H.add_edge(u, v)
+                    assert not nx.is_directed_acyclic_graph(H)
+                else:
+                    assert nx.is_directed_acyclic_graph(ito.graph)
+            elif op == 1 and ito.graph.number_of_edges() > 0:
+                ito.remove_edge(*rng.choice(list(ito.graph.edges)))
+            elif op == 2:
+                ito.add_node(f"extra-{step}")
+            else:
+                batch = [tuple(rng.sample(nodes, 2)) for _ in range(5)]
+                try:
+                    ito.add_edges_from(batch)
+                except nx.HasACycle:
+                    pass
+            # Cross-validate the maintained order against a full check.
+            assert ito.is_valid()
+            assert set(ito.order) == set(ito.graph.nodes)
