@@ -63,6 +63,7 @@ Algorithms
    regular
    rich_club
    shortest_paths
+   signed
    similarity
    simple_paths
    smallworld

@@ -44,6 +44,7 @@ from networkx.algorithms.reciprocity import *
 from networkx.algorithms.regular import *
 from networkx.algorithms.richclub import *
 from networkx.algorithms.shortest_paths import *
+from networkx.algorithms.signed import *
 from networkx.algorithms.similarity import *
 from networkx.algorithms.graph_hashing import *
 from networkx.algorithms.simple_paths import *
