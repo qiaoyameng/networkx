@@ -76,6 +76,7 @@ Algorithms
    tournament
    traversal
    tree
+   treewidth
    triads
    vitality
    voronoi
